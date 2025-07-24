@@ -6,7 +6,10 @@ import sqlite3
 from datetime import datetime
 import os
 
-SERVER_URL = "https://python.topcam.ai.vn/api/student/list"
+# Sử dụng API mới
+SERVER_URL = "https://topcam.ai.vn/apis/syncStudentsAPI"
+LAST_UPDATED_URL = "https://topcam.ai.vn/apis/lastUpdatedStudentAPI"
+TOKEN = "P8Hg4ukCiRI3NUMDvKmscEFnL0OtzT1752552517"
 DB_FILE = "../students_local.db"
 
 
@@ -16,22 +19,19 @@ def initialize_database():
     Nó sẽ tự động tạo file và bảng nếu chúng chưa có.
     """
     try:
-        # sqlite3.connect sẽ tự động tạo file DB nếu nó chưa tồn tại.
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-
-        # Lệnh 'CREATE TABLE IF NOT EXISTS' đảm bảo bảng chỉ được tạo nếu chưa có.
         c.execute("""
                   CREATE TABLE IF NOT EXISTS students (
                       id INTEGER PRIMARY KEY,
                       full_name TEXT NOT NULL,
-                      vector_face TEXT
+                      code_student TEXT,
+                      vector_face TEXT,
+                      updated_at TEXT
                   )
                   """)
-
         conn.commit()
         conn.close()
-        # print(f"Cơ sở dữ liệu '{DB_FILE}' đã sẵn sàng.")
         return True
     except sqlite3.Error as e:
         print(f"Lỗi khi khởi tạo database: {e}")
@@ -47,24 +47,24 @@ def save_to_sqlite(students):
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-
-        # Xóa dữ liệu cũ trước khi chèn dữ liệu mới để đồng bộ
         c.execute("DELETE FROM students")
-
-        # Sử dụng executemany để chèn dữ liệu hiệu quả hơn
         student_data = [
-            (s["id"], s["full_name"], json.dumps(s.get("vector_face")))
+            (
+                s.get("id"),
+                s.get("full_name"),
+                s.get("code_student"),
+                s.get("vector_face"),
+                s.get("updated_at")
+            )
             for s in students
         ]
         c.executemany(
-            "INSERT INTO students (id, full_name, vector_face) VALUES (?, ?, ?)",
+            "INSERT INTO students (id, full_name, code_student, vector_face, updated_at) VALUES (?, ?, ?, ?, ?)",
             student_data
         )
-
         conn.commit()
         conn.close()
         print(f"Đã lưu thành công {len(students)} học sinh vào database cục bộ '{DB_FILE}'")
-
     except sqlite3.Error as e:
         print(f"Lỗi khi lưu vào SQLite: {e}")
 
@@ -72,30 +72,33 @@ def save_to_sqlite(students):
 def fetch_students():
     """Lấy danh sách học sinh từ server và lưu vào DB nếu trong khung giờ cho phép."""
     now = datetime.now()
-
     # # Cho phép chạy vào 1h và 13h
     # if not (now.hour == 1 or now.hour == 13):
     #     print("Không nằm trong khung giờ cập nhật (1h hoặc 13h), dừng lại.")
     #     return
 
     try:
-        # Thêm một khoảng chờ ngẫu nhiên để tránh các request đồng thời
-        delay = random.randint(0, 1000)
+        delay = random.randint(0, 10)  # Giảm thời gian chờ cho tiện test
         print(f"Đợi {delay} giây trước khi lấy danh sách từ server...")
         time.sleep(delay)
 
-        print(f"Đang kết nối tới server: {SERVER_URL}")
-        response = requests.get(SERVER_URL, timeout=15)  # Tăng timeout
-        response.raise_for_status()  # Ném lỗi nếu status code là 4xx hoặc 5xx
+        print(f"Đang lấy thời gian cập nhật gần nhất từ: {LAST_UPDATED_URL}")
+        last_updated_resp = requests.get(LAST_UPDATED_URL, timeout=15)
+        last_updated_resp.raise_for_status()
+        last_updated_data = last_updated_resp.json()
+        last_updated_at = last_updated_data.get("data", {}).get("last_updated_at")
+        print(f"Thời gian cập nhật gần nhất: {last_updated_at}")
 
+        print(f"Đang kết nối tới server: {SERVER_URL}")
+        response = requests.post(SERVER_URL, data={"token": TOKEN}, timeout=15)
+        response.raise_for_status()
         data = response.json()
-        if not data.get("success"):
-            print(f"API trả về không thành công: {data.get('message', 'Không có thông báo lỗi')}")
+        if data.get("code") != 1:
+            print(f"API trả về không thành công: {data.get('mess', 'Không có thông báo lỗi')}")
             return
 
         students = data.get("data", [])
 
-        # Lọc ra những học sinh có đủ thông tin id và full_name
         filtered_students = [
             s for s in students if s.get("id") and s.get("full_name")
         ]
@@ -104,7 +107,6 @@ def fetch_students():
             print("Không nhận được dữ liệu học sinh hợp lệ từ server.")
             return
 
-        # Gọi hàm lưu trữ
         save_to_sqlite(filtered_students)
 
     except requests.exceptions.Timeout:
@@ -118,7 +120,5 @@ def fetch_students():
 
 
 if __name__ == "__main__":
-    # Bước 1: Khởi tạo và đảm bảo database đã sẵn sàng.
     if initialize_database():
-        # Bước 2: Nếu database sẵn sàng, tiến hành lấy dữ liệu.
         fetch_students()
