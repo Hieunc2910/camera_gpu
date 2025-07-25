@@ -148,4 +148,12 @@ if __name__ == "__main__":
     if initialize_database():
         fetch_students()
     show_database()
+    try:
+        print("Đang cập nhật FAISS index từ database...")
+        subprocess.run(
+            ["python", "../scripts/populate_faiss_from_db.py"],
+            check=True
+        )
+    except Exception as e:
+        print(f"Lỗi khi gọi populate_faiss_from_db.py: {e}")
 
