@@ -26,6 +26,421 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <json-glib/json-glib.h>
+
+/* Cấu trúc để theo dõi người đã xuất hiện */
+typedef struct PersonTracker {
+    char name[256];
+    time_t last_seen;
+    gboolean is_present;
+    struct PersonTracker* next;
+} PersonTracker;
+
+/* Danh sách linked list để theo dõi các người */
+static PersonTracker* person_list = NULL;
+static GMutex person_list_mutex;
+
+/* Thời gian timeout (5 phút) */
+#define PRESENCE_TIMEOUT 300  // 5 minutes in seconds
+/* Thời gian giữ log (3 ngày) */
+#define LOG_RETENTION_DAYS 3
+#define LOG_RETENTION_SECONDS (LOG_RETENTION_DAYS * 24 * 60 * 60)  // 3 days in seconds
+
+/* Hàm tạo thư mục nếu chưa tồn tại */
+static gboolean create_directory_if_not_exists(const char* path) {
+    struct stat st = {0};
+    if (stat(path, &st) == -1) {
+        if (mkdir(path, 0755) == -1) {
+            g_print("Error: Cannot create directory %s\n", path);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* Hàm tạo file log.json nếu chưa có */
+static gboolean create_log_file_if_not_exists(const char* filename) {
+    FILE* file = fopen(filename, "r");
+    if (file == NULL) {
+        /* File chưa tồn tại, tạo file mới với array JSON rỗng */
+        file = fopen(filename, "w");
+        if (file == NULL) {
+            g_print("Error: Cannot create log file %s\n", filename);
+            return FALSE;
+        }
+        fprintf(file, "[]");
+        fclose(file);
+        g_print("Created new log file: %s\n", filename);
+    } else {
+        fclose(file);
+    }
+    return TRUE;
+}
+
+/* Hàm tìm person trong danh sách */
+static PersonTracker* find_person(const char* name) {
+    PersonTracker* current = person_list;
+    while (current != NULL) {
+        if (strcmp(current->name, name) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+/* Hàm thêm person mới vào danh sách */
+static PersonTracker* add_person(const char* name) {
+    PersonTracker* new_person = (PersonTracker*)malloc(sizeof(PersonTracker));
+    if (new_person == NULL) {
+        g_print("Error: Cannot allocate memory for new person\n");
+        return NULL;
+    }
+
+    strncpy(new_person->name, name, sizeof(new_person->name) - 1);
+    new_person->name[sizeof(new_person->name) - 1] = '\0';
+    new_person->last_seen = time(NULL);
+    new_person->is_present = TRUE;
+    new_person->next = person_list;
+    person_list = new_person;
+
+    return new_person;
+}
+
+/* Hàm lưu frame thành ảnh */
+static gboolean save_frame_as_image(GstBuffer* buf, const char* person_name) {
+    GstMapInfo map;
+    char filename[512];
+    char timestamp_str[64];
+    time_t current_time;
+    struct tm* time_info;
+    FILE* file;
+
+    /* Tạo thư mục pics_log nếu chưa có */
+    if (!create_directory_if_not_exists("pics_log")) {
+        return FALSE;
+    }
+
+    /* Tạo tên file với timestamp */
+    current_time = time(NULL);
+    time_info = localtime(&current_time);
+    strftime(timestamp_str, sizeof(timestamp_str), "%Y%m%d_%H%M%S", time_info);
+    snprintf(filename, sizeof(filename), "pics_log/%s_%s.jpg", person_name, timestamp_str);
+
+    /* Map buffer để lấy dữ liệu */
+    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) {
+        g_print("Error: Cannot map buffer for saving image\n");
+        return FALSE;
+    }
+
+    /* Lưu dữ liệu thô vào file (cần có OpenCV hoặc thư viện khác để convert sang JPEG) */
+    file = fopen(filename, "wb");
+    if (file != NULL) {
+        fwrite(map.data, 1, map.size, file);
+        fclose(file);
+        g_print("Saved frame: %s\n", filename);
+    } else {
+        g_print("Error: Cannot create image file %s\n", filename);
+        gst_buffer_unmap(buf, &map);
+        return FALSE;
+    }
+
+    gst_buffer_unmap(buf, &map);
+    return TRUE;
+}
+
+/* Hàm ghi log recognition event */
+static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer) {
+    JsonParser* parser = NULL;
+    JsonNode* root_node = NULL;
+    JsonArray* root_array = NULL;
+    JsonObject* new_entry = NULL;
+    JsonGenerator* generator = NULL;
+    char timestamp_str[64];
+    time_t current_time;
+    struct tm* time_info;
+    gchar* json_string = NULL;
+    GError* error = NULL;
+
+    g_mutex_lock(&person_list_mutex);
+
+    current_time = time(NULL);
+    PersonTracker* person = find_person(person_name);
+
+    if (person == NULL) {
+        /* Người mới, thêm vào danh sách và ghi log */
+        person = add_person(person_name);
+        if (person == NULL) {
+            g_mutex_unlock(&person_list_mutex);
+            return;
+        }
+
+        /* Lưu frame đầu tiên */
+        if (frame_buffer) {
+            save_frame_as_image(frame_buffer, person_name);
+        }
+
+    } else {
+        /* Kiểm tra xem đã quá 5 phút chưa */
+        if (current_time - person->last_seen < PRESENCE_TIMEOUT && person->is_present) {
+            /* Vẫn còn trong khoảng thời gian, chỉ cập nhật last_seen */
+            person->last_seen = current_time;
+            g_mutex_unlock(&person_list_mutex);
+            return;
+        } else {
+            /* Đã quá 5 phút hoặc người này đã được đánh dấu là không có mặt */
+            person->last_seen = current_time;
+            person->is_present = TRUE;
+
+            /* Lưu frame cho lần xuất hiện mới */
+            if (frame_buffer) {
+                save_frame_as_image(frame_buffer, person_name);
+            }
+        }
+    }
+
+    g_mutex_unlock(&person_list_mutex);
+
+    /* Tạo file log.json nếu chưa có */
+    if (!create_log_file_if_not_exists("log.json")) {
+        return;
+    }
+
+    /* Parse file JSON hiện tại */
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_file(parser, "log.json", &error)) {
+        g_print("Error parsing log.json: %s\n", error->message);
+        g_error_free(error);
+        g_object_unref(parser);
+        return;
+    }
+
+    root_node = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_ARRAY(root_node)) {
+        g_print("Error: log.json does not contain an array\n");
+        g_object_unref(parser);
+        return;
+    }
+
+    root_array = json_node_get_array(root_node);
+
+    /* Tạo entry mới */
+    new_entry = json_object_new();
+
+    /* Format timestamp */
+    time_info = localtime(&current_time);
+    strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d %H:%M:%S", time_info);
+
+    json_object_set_string_member(new_entry, "name", person_name);
+    json_object_set_string_member(new_entry, "timestamp", timestamp_str);
+
+    /* Thêm vào array */
+    JsonNode* entry_node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(entry_node, new_entry);
+    json_array_add_element(root_array, entry_node);
+
+    /* Ghi lại file */
+    generator = json_generator_new();
+    json_generator_set_root(generator, root_node);
+    json_generator_set_pretty(generator, TRUE);
+
+    if (!json_generator_to_file(generator, "log.json", &error)) {
+        g_print("Error writing to log.json: %s\n", error->message);
+        g_error_free(error);
+    } else {
+        g_print("Logged recognition event: %s at %s\n", person_name, timestamp_str);
+    }
+
+    /* Cleanup */
+    g_object_unref(generator);
+    g_object_unref(parser);
+}
+
+/* Hàm xóa log cũ hơn 3 ngày */
+static void cleanup_old_logs() {
+    JsonParser* parser = NULL;
+    JsonNode* root_node = NULL;
+    JsonArray* root_array = NULL;
+    JsonArray* new_array = NULL;
+    JsonGenerator* generator = NULL;
+    GError* error = NULL;
+    time_t current_time = time(NULL);
+    time_t cutoff_time = current_time - LOG_RETENTION_SECONDS;
+    gint array_length, i;
+    gboolean has_changes = FALSE;
+
+    /* Kiểm tra xem file log.json có tồn tại không */
+    if (access("log.json", F_OK) != 0) {
+        return; /* File không tồn tại, không cần cleanup */
+    }
+
+    /* Parse file JSON hiện tại */
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_file(parser, "log.json", &error)) {
+        g_print("Error parsing log.json for cleanup: %s\n", error->message);
+        g_error_free(error);
+        g_object_unref(parser);
+        return;
+    }
+
+    root_node = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_ARRAY(root_node)) {
+        g_print("Error: log.json does not contain an array\n");
+        g_object_unref(parser);
+        return;
+    }
+
+    root_array = json_node_get_array(root_node);
+    array_length = json_array_get_length(root_array);
+
+    /* Tạo array mới để chứa các entry còn hợp lệ */
+    new_array = json_array_new();
+
+    /* Duyệt qua các entry và chỉ giữ lại những entry trong 3 ngày */
+    for (i = 0; i < array_length; i++) {
+        JsonNode* element_node = json_array_get_element(root_array, i);
+        if (JSON_NODE_HOLDS_OBJECT(element_node)) {
+            JsonObject* entry_obj = json_node_get_object(element_node);
+            const gchar* timestamp_str = json_object_get_string_member(entry_obj, "timestamp");
+
+            if (timestamp_str) {
+                struct tm time_struct = {0};
+                time_t entry_time;
+
+                /* Parse timestamp string (format: "YYYY-MM-DD HH:MM:SS") */
+                if (strptime(timestamp_str, "%Y-%m-%d %H:%M:%S", &time_struct)) {
+                    entry_time = mktime(&time_struct);
+
+                    /* Nếu entry còn trong thời hạn 3 ngày, giữ lại */
+                    if (entry_time >= cutoff_time) {
+                        json_array_add_element(new_array, json_node_copy(element_node));
+                    } else {
+                        has_changes = TRUE;
+                        g_print("Removed old log entry: %s at %s\n",
+                               json_object_get_string_member(entry_obj, "name"),
+                               timestamp_str);
+                    }
+                } else {
+                    /* Nếu không parse được timestamp, giữ lại để an toàn */
+                    json_array_add_element(new_array, json_node_copy(element_node));
+                }
+            } else {
+                /* Nếu không có timestamp, giữ lại để an toàn */
+                json_array_add_element(new_array, json_node_copy(element_node));
+            }
+        }
+    }
+
+    /* Nếu có thay đổi, ghi lại file */
+    if (has_changes) {
+        JsonNode* new_root = json_node_new(JSON_NODE_ARRAY);
+        json_node_set_array(new_root, new_array);
+
+        generator = json_generator_new();
+        json_generator_set_root(generator, new_root);
+        json_generator_set_pretty(generator, TRUE);
+
+        if (!json_generator_to_file(generator, "log.json", &error)) {
+            g_print("Error writing cleaned log.json: %s\n", error->message);
+            g_error_free(error);
+        } else {
+            g_print("Cleaned up old log entries (older than %d days)\n", LOG_RETENTION_DAYS);
+        }
+
+        g_object_unref(generator);
+        json_node_free(new_root);
+    } else {
+        json_array_unref(new_array);
+    }
+
+    g_object_unref(parser);
+}
+
+/* Hàm cleanup để đánh dấu người không còn xuất hiện */
+static gboolean cleanup_absent_persons(gpointer user_data) {
+    time_t current_time = time(NULL);
+    PersonTracker* current;
+
+    g_mutex_lock(&person_list_mutex);
+    current = person_list;
+
+    while (current != NULL) {
+        if (current->is_present && (current_time - current->last_seen) >= PRESENCE_TIMEOUT) {
+            current->is_present = FALSE;
+            g_print("Person %s marked as absent\n", current->name);
+        }
+        current = current->next;
+    }
+
+    g_mutex_unlock(&person_list_mutex);
+    return TRUE; /* Tiếp tục timer */
+}
+
+/* Hàm cleanup định kỳ cho log và ảnh cũ */
+static gboolean cleanup_old_data(gpointer user_data) {
+    cleanup_old_logs();
+    return TRUE; /* Tiếp tục timer */
+}
+
+/*
+ * THÊM VÀO HÀM main() TRƯỚC KHI KHỞI TẠO PIPELINE:
+ */
+void initialize_logging_system() {
+    g_mutex_init(&person_list_mutex);
+
+    /* Tạo timer để cleanup các person không còn xuất hiện (chạy mỗi 30 giây) */
+    g_timeout_add_seconds(30, cleanup_absent_persons, NULL);
+
+    /* Tạo timer để cleanup log và ảnh cũ (chạy mỗi 6 giờ) */
+    g_timeout_add_seconds(6 * 60 * 60, cleanup_old_data, NULL);
+
+    /* Chạy cleanup ngay lần đầu để xóa data cũ */
+    cleanup_old_logs();
+
+    g_print("Face recognition logging system initialized with %d-day retention\n", LOG_RETENTION_DAYS);
+}
+
+/*
+ * SỬA ĐỔI TRONG HÀM process_meta() HOẶC HÀM XỬ LÝ METADATA:
+ * Thêm đoạn code sau khi phát hiện được khuôn mặt và có tên người:
+ */
+
+/*
+// Trong hàm xử lý metadata, khi đã có tên người và frame buffer:
+if (person_name && strlen(person_name) > 0) {
+    // Gọi hàm log recognition event
+    log_recognition_event(person_name, frame_buffer);
+}
+*/
+
+/*
+ * THÊM VÀO HÀM cleanup/destroy:
+ */
+void cleanup_logging_system() {
+    PersonTracker* current = person_list;
+    PersonTracker* next;
+
+    g_mutex_lock(&person_list_mutex);
+    while (current != NULL) {
+        next = current->next;
+        free(current);
+        current = next;
+    }
+    person_list = NULL;
+    g_mutex_unlock(&person_list_mutex);
+
+    g_mutex_clear(&person_list_mutex);
+    g_print("Face recognition logging system cleaned up\n");
+}
 
 #define MAX_DISPLAY_LEN 64
 static guint batch_num = 0;
@@ -378,7 +793,7 @@ static gint component_id_compare_func(gconstpointer a, gconstpointer b)
  * It also demonstrates how to join the different labels(PGIE + SGIEs)
  * of an object to form a single string.
  */
-static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta)
+static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta, GstBuffer *frame_buffer)
 {
     // For single source always display text either with demuxer or with tiler
     if (!appCtx->config.tiled_display_config.enable || appCtx->config.num_source_sub_bins == 1) {
@@ -470,14 +885,19 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta)
                 for (NvDsMetaList *l_label = cmeta->label_info_list; l_label != NULL;
                      l_label = l_label->next) {
                     NvDsLabelInfo *label = (NvDsLabelInfo *)l_label->data;
+                    const char *person_name = NULL;
                     if (label->pResult_label) {
                         sprintf(str_ins_pos, " %s", label->pResult_label);
+                        person_name = label->pResult_label;
                     } else if (label->result_label[0] != '\0') {
                         sprintf(str_ins_pos, " %s", label->result_label);
+                        person_name = label->result_label;
                     }
                     str_ins_pos += strlen(str_ins_pos);
-                    sprintf(str_ins_pos, " %f", label->result_prob);
-                    str_ins_pos += strlen(str_ins_pos);
+                    // Gọi log_recognition_event nếu có tên người
+                    if (person_name && strlen(person_name) > 0) {
+                        log_recognition_event(person_name, frame_buffer);
+                    }
                 }
             }
         }
@@ -496,7 +916,7 @@ static void process_buffer(GstBuffer *buf, AppCtx *appCtx, guint index)
         NVGSTDS_WARN_MSG_V("Batch meta not found for buffer %p", buf);
         return;
     }
-    process_meta(appCtx, batch_meta);
+    process_meta(appCtx, batch_meta, buf);
     // NvDsInstanceData *data = &appCtx->instance_data[index];
     // guint i;
 
@@ -1085,6 +1505,9 @@ gboolean create_pipeline(AppCtx *appCtx,
         NVGSTDS_ERR_MSG_V("Failed to create pipeline");
         goto done;
     }
+    // Khởi tạo hệ thống logging nhận diện khuôn mặt
+    initialize_logging_system();
+    g_print("Face recognition logging system initialized\n");
 
     bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline->pipeline));
     pipeline->bus_id = gst_bus_add_watch(bus, bus_callback, appCtx);
@@ -1505,6 +1928,9 @@ void destroy_pipeline(AppCtx *appCtx)
                 stop_cloud_to_device_messaging(appCtx->c2d_ctx[i]);
         }
     }
+
+    // Cleanup logging khi giải phóng pipeline
+    cleanup_logging_system();
 }
 
 gboolean pause_pipeline(AppCtx *appCtx)
