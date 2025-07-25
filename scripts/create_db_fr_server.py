@@ -70,41 +70,24 @@ def save_to_sqlite(students):
 
 
 def fetch_students():
-    """Lấy danh sách học sinh từ server và lưu vào DB nếu trong khung giờ cho phép."""
-    now = datetime.now()
-
-    # # Cho phép chạy vào 1h và 13h
-    # if not (now.hour == 1 or now.hour == 13):
-    #     print("Không nằm trong khung giờ cập nhật (1h hoặc 13h), dừng lại.")
-    #     return
-
+    """Lấy danh sách học sinh từ server và lưu vào DB."""
     try:
-        # Thêm một khoảng chờ ngẫu nhiên để tránh các request đồng thời
-        delay = random.randint(0, 1000)
-        print(f"Đợi {delay} giây trước khi lấy danh sách từ server...")
-        time.sleep(delay)
-
         print(f"Đang kết nối tới server: {SERVER_URL}")
-        response = requests.get(SERVER_URL, timeout=15)  # Tăng timeout
-        response.raise_for_status()  # Ném lỗi nếu status code là 4xx hoặc 5xx
-
+        response = requests.get(SERVER_URL, timeout=15)
+        response.raise_for_status()
         data = response.json()
         if not data.get("success"):
             print(f"API trả về không thành công: {data.get('message', 'Không có thông báo lỗi')}")
             return
 
         students = data.get("data", [])
-
-        # Lọc ra những học sinh có đủ thông tin id và full_name
         filtered_students = [
             s for s in students if s.get("id") and s.get("full_name")
         ]
-
         if not filtered_students:
             print("Không nhận được dữ liệu học sinh hợp lệ từ server.")
             return
 
-        # Gọi hàm lưu trữ
         save_to_sqlite(filtered_students)
 
     except requests.exceptions.Timeout:
@@ -122,3 +105,13 @@ if __name__ == "__main__":
     if initialize_database():
         # Bước 2: Nếu database sẵn sàng, tiến hành lấy dữ liệu.
         fetch_students()
+
+        # Bước 3: Gọi tiếp script populate_faiss_from_db.py
+        try:
+            print("Đang cập nhật FAISS index từ database...")
+            subprocess.run(
+                ["python", "../scripts/populate_faiss_from_db.py"],
+                check=True
+            )
+        except Exception as e:
+            print(f"Lỗi khi gọi populate_faiss_from_db.py: {e}")

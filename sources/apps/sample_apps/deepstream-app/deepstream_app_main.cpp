@@ -50,6 +50,50 @@
 /* End Custom */
 ////////////////
 
+/*Standard lib*/
+#include <pthread.h>
+#include <time.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+
+// Thread đồng bộ database 2 lần/ngày
+void* sync_student_db_thread(void* arg) {
+    while (1) {
+        time_t now = time(NULL);
+        struct tm *tm_now = localtime(&now);
+
+        // Sinh giờ phút random cho hôm nay nếu sang ngày mới
+        static int rand_hour = -1, rand_minute = -1, last_day = -1;
+        if (last_day != tm_now->tm_mday) {
+            rand_hour = rand() % 12;      // 0-11h
+            rand_minute = rand() % 60;    // 0-59p
+            last_day = tm_now->tm_mday;
+        }
+
+        int hour = tm_now->tm_hour;
+        int minute = tm_now->tm_min;
+
+        // Nếu đúng giờ phút lần 1 hoặc lần 2 thì gọi script
+        if ((hour == rand_hour && minute == rand_minute) ||
+            (hour == (rand_hour + 12) % 24 && minute == rand_minute)) {
+            printf("Đang đồng bộ database học sinh...\n");
+            system("python ../scripts/create_db_fr_server.py");
+            sleep(60); // Chờ 1 phút để tránh gọi lặp lại trong cùng phút
+        }
+
+        sleep(10); // Kiểm tra lại sau 10 giây
+    }
+    return NULL;
+}
+
+// Gọi hàm này ở đầu hàm main để khởi động thread nền
+void start_student_db_sync_thread() {
+    pthread_t tid;
+    pthread_create(&tid, NULL, sync_student_db_thread, NULL);
+    pthread_detach(tid);
+}
+
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
 
@@ -931,6 +975,7 @@ static gboolean recreate_pipeline_thread_func(gpointer arg)
 
 int main(int argc, char *argv[])
 {
+    start_student_db_sync_thread();
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
     GError *error = NULL;
