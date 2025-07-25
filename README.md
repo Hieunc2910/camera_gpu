@@ -51,6 +51,7 @@ docker run --runtime nvidia --rm -it \
     Add new face from server:
     - export LANG=C.UTF-8
     - export LC_ALL=C.UTF-8
+    - export TZ=Asia/Ho_Chi_Minh
     - python3 scripts/create_db_fr_server.py
     - python3 scripts/populate_faiss_from_db.py
 
