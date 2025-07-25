@@ -47,11 +47,13 @@ docker run --runtime nvidia --rm -it \
   -v $(pwd):/app \
   -e DISPLAY=$DISPLAY \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  hiennguyen9874/deepstream-face-recognition:deepstream-6.0.1 bash`
-    -   Add new face:
-        -   A: `  A docs/A.png docs/A2.png`
-        -   B: `python3 scripts/add_face_from_file.py B docs/B.png docs/B2.png`
-        -   C: `python3 scripts/add_face_from_file.py C docs/C.png docs/C2.png`
+   hieung/deepstream-face-recognition:deepstream-6.0.1 bash`
+    Add new face from server:
+    - export LANG=C.UTF-8
+    - export LC_ALL=C.UTF-8
+    - python3 scripts/create_db_fr_server.py
+    - python3 scripts/populate_faiss_from_db.py
+
     -   Build source: `bash sources/install.sh`
     -   Run: `./bin/deepstream-app -c samples/configs/deepstream_app.txt`
     -   Output in [./outputs/videos](./outputs/videos/)
