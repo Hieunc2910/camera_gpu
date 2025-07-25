@@ -32,7 +32,7 @@ network-type=1
 # current not working with deepstream 6.0.1
 classifier-type=facerecognition
 classifier-async-mode=0
-classifier-threshold=0.25
+classifier-threshold=0.3
 
 secondary-reinfer-interval=15
 

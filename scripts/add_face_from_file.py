@@ -103,6 +103,8 @@ def main(image_path: str, image_name: str, faiss_path: str, label_path: str):
     print("index.is_trained", index.is_trained)
 
     feature_vector = np.expand_dims(feature_vector, axis=0)
+    print(feature_vector.flatten().tolist())
+
     faiss.normalize_L2(feature_vector)
 
     index.add(feature_vector)
