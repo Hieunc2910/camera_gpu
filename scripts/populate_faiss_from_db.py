@@ -11,7 +11,7 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT full_name, vector_face FROM students ORDER BY id ASC")
+        cursor.execute("SELECT id, full_name, code_student, vector_face FROM students ORDER BY id ASC")
         rows = cursor.fetchall()
         conn.close()
 
@@ -25,18 +25,18 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
             print(f"Created empty FAISS index: {faiss_path} and labels file: {labels_path}")
             return False
 
-        names = []
+        labels = []
         encodings = []
-        for name, vector_face in rows:
-            print(f"Raw vector_face for {name}: {vector_face}")  # Debug print
+        for id, full_name, code_student, vector_face in rows:
+            print(f"Raw vector_face for {full_name}: {vector_face}")  # Debug print
             if not vector_face or vector_face == "null":
                 continue
             try:
                 encoding_np = np.array(json.loads(vector_face), dtype=np.float32)
-                names.append(name)
+                labels.append((id, full_name, code_student))
                 encodings.append(encoding_np)
             except Exception as e:
-                print(f"Error parsing vector_face for {name}: {e}")
+                print(f"Error parsing vector_face for {full_name}: {e}")
 
         if not encodings:
             print("No valid encodings found.")
@@ -66,8 +66,8 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
         print(f"FAISS index saved to: {faiss_path}")
 
         with open(labels_path, "w") as f:
-            for name in names:
-                f.write(f"{name}\n")
+            for id, full_name, code_student in labels:
+                f.write(f"{id},{full_name},{code_student}\n")
         print(f"Labels saved to: {labels_path}")
 
         return True

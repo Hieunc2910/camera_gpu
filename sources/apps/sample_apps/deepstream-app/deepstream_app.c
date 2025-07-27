@@ -42,7 +42,8 @@ typedef struct PersonTracker {
     gboolean is_present;
     struct PersonTracker* next;
 } PersonTracker;
-
+/* Hàm callback để lưu frame đầy đủ */
+static SaveFullFrameCallback g_save_full_frame_callback = NULL;
 /* Danh sách linked list để theo dõi các người */
 static PersonTracker* person_list = NULL;
 static GMutex person_list_mutex;
@@ -114,47 +115,6 @@ static PersonTracker* add_person(const char* name) {
     return new_person;
 }
 
-/* Hàm lưu frame thành ảnh */
-static gboolean save_frame_as_image(GstBuffer* buf, const char* person_name) {
-    GstMapInfo map;
-    char filename[512];
-    char timestamp_str[64];
-    time_t current_time;
-    struct tm* time_info;
-    FILE* file;
-
-    /* Tạo thư mục pics_log nếu chưa có */
-    if (!create_directory_if_not_exists("pics_log")) {
-        return FALSE;
-    }
-
-    /* Tạo tên file với timestamp */
-    current_time = time(NULL);
-    time_info = localtime(&current_time);
-    strftime(timestamp_str, sizeof(timestamp_str), "%Y%m%d_%H%M%S", time_info);
-    snprintf(filename, sizeof(filename), "pics_log/%s_%s.jpg", person_name, timestamp_str);
-
-    /* Map buffer để lấy dữ liệu */
-    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) {
-        g_print("Error: Cannot map buffer for saving image\n");
-        return FALSE;
-    }
-
-    /* Lưu dữ liệu thô vào file (cần có OpenCV hoặc thư viện khác để convert sang JPEG) */
-    file = fopen(filename, "wb");
-    if (file != NULL) {
-        fwrite(map.data, 1, map.size, file);
-        fclose(file);
-        g_print("Saved frame: %s\n", filename);
-    } else {
-        g_print("Error: Cannot create image file %s\n", filename);
-        gst_buffer_unmap(buf, &map);
-        return FALSE;
-    }
-
-    gst_buffer_unmap(buf, &map);
-    return TRUE;
-}
 
 /* Hàm ghi log recognition event */
 static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer) {
@@ -183,8 +143,8 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
         }
 
         /* Lưu frame đầu tiên */
-        if (frame_buffer) {
-            save_frame_as_image(frame_buffer, person_name);
+        if (frame_buffer && g_save_full_frame_callback) {
+            g_save_full_frame_callback(frame_buffer, person_name);
         }
 
     } else {
@@ -200,8 +160,8 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
             person->is_present = TRUE;
 
             /* Lưu frame cho lần xuất hiện mới */
-            if (frame_buffer) {
-                save_frame_as_image(frame_buffer, person_name);
+            if (frame_buffer && g_save_full_frame_callback) {
+                g_save_full_frame_callback(frame_buffer, person_name);
             }
         }
     }
@@ -391,9 +351,7 @@ static gboolean cleanup_old_data(gpointer user_data) {
     return TRUE; /* Tiếp tục timer */
 }
 
-/*
- * THÊM VÀO HÀM main() TRƯỚC KHI KHỞI TẠO PIPELINE:
- */
+
 void initialize_logging_system() {
     g_mutex_init(&person_list_mutex);
 
@@ -403,28 +361,14 @@ void initialize_logging_system() {
     /* Tạo timer để cleanup log và ảnh cũ (chạy mỗi 6 giờ) */
     g_timeout_add_seconds(6 * 60 * 60, cleanup_old_data, NULL);
 
+    set_save_full_frame_callback(g_save_full_frame_callback);
     /* Chạy cleanup ngay lần đầu để xóa data cũ */
     cleanup_old_logs();
 
     g_print("Face recognition logging system initialized with %d-day retention\n", LOG_RETENTION_DAYS);
 }
 
-/*
- * SỬA ĐỔI TRONG HÀM process_meta() HOẶC HÀM XỬ LÝ METADATA:
- * Thêm đoạn code sau khi phát hiện được khuôn mặt và có tên người:
- */
 
-/*
-// Trong hàm xử lý metadata, khi đã có tên người và frame buffer:
-if (person_name && strlen(person_name) > 0) {
-    // Gọi hàm log recognition event
-    log_recognition_event(person_name, frame_buffer);
-}
-*/
-
-/*
- * THÊM VÀO HÀM cleanup/destroy:
- */
 void cleanup_logging_system() {
     PersonTracker* current = person_list;
     PersonTracker* next;
@@ -440,6 +384,26 @@ void cleanup_logging_system() {
 
     g_mutex_clear(&person_list_mutex);
     g_print("Face recognition logging system cleaned up\n");
+}
+
+typedef struct {
+    int id;
+    char full_name[128];
+    char code_student[64];
+} StudentInfo;
+StudentInfo students[MAX_STUDENTS];
+int num_students = 0;
+
+void load_labels(const char* filename) {
+    FILE* f = fopen(filename, "r");
+    if (!f) return;
+    char line[256];
+    num_students = 0;
+    while (fgets(line, sizeof(line), f)) {
+        sscanf(line, "%d,%127[^,],%63s", &students[num_students].id, students[num_students].full_name, students[num_students].code_student);
+        num_students++;
+    }
+    fclose(f);
 }
 
 #define MAX_DISPLAY_LEN 64

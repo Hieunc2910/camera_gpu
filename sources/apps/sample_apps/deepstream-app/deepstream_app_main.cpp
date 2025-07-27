@@ -35,7 +35,6 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "deepstream_app.h"
 #include "deepstream_config_file_parser.h"
 #include "nvds_version.h"
 /////////////////
@@ -57,6 +56,15 @@
 #include <stdio.h>
 #include <unistd.h>
 
+extern "C" {
+#include "deepstream_app.h"
+}
+extern "C" {
+    static SaveFullFrameCallback g_save_full_frame_callback = nullptr;
+    void set_save_full_frame_callback(SaveFullFrameCallback cb) {
+        g_save_full_frame_callback = cb;
+    }
+}
 // Thread đồng bộ database 2 lần/ngày
 void* sync_student_db_thread(void* arg) {
     while (1) {
@@ -500,6 +508,35 @@ static void bbox_generated_probe_after_analytics(AppCtx *appCtx,
     }
 }
 
+
+extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person_name) {
+    GstMapInfo inmap = GST_MAP_INFO_INIT;
+    if (!gst_buffer_map(frame_buffer, &inmap, GST_MAP_READ)) return;
+    NvBufSurface* ip_surf = (NvBufSurface*)inmap.data;
+
+    // Tạo dummy NvDsObjectMeta để lấy full frame
+    NvDsObjectMeta dummy_obj_meta;
+    dummy_obj_meta.rect_params.left = 0;
+    dummy_obj_meta.rect_params.top = 0;
+    dummy_obj_meta.rect_params.width = ip_surf->surfaceList[0].width;
+    dummy_obj_meta.rect_params.height = ip_surf->surfaceList[0].height;
+
+    // Tạo đường dẫn file
+    time_t now = time(NULL);
+    struct tm* t = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+    std::string path = "pics_log/";
+    path += person_name;
+    path += "_";
+    path += timestamp;
+    path += ".jpg";
+
+    unsigned obj_counter = 0;
+    save_image(path, ip_surf, &dummy_obj_meta, nullptr, obj_counter);
+
+    gst_buffer_unmap(frame_buffer, &inmap);
+}
 ////////////////
 /* End Custom */
 ////////////////
@@ -976,6 +1013,7 @@ static gboolean recreate_pipeline_thread_func(gpointer arg)
 int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
+    set_save_full_frame_callback(save_full_frame_impl);
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
     GError *error = NULL;
@@ -1273,3 +1311,5 @@ int main(int argc, char *argv[])
 
     return return_value;
 }
+}
+

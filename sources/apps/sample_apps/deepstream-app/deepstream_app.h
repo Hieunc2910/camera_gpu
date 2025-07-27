@@ -272,9 +272,14 @@ void restart_pipeline(AppCtx *appCtx);
  * @return true if parsed successfully.
  */
 gboolean parse_config_file(NvDsConfig *config, gchar *cfg_file_path);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef void (*SaveFullFrameCallback)(GstBuffer* frame_buffer, const char* person_name);
+void set_save_full_frame_callback(SaveFullFrameCallback cb);
 
 #ifdef __cplusplus
 }
 #endif
-
-#endif
+#endif /* __NVGSTDS_APP_H__ */
