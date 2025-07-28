@@ -56,15 +56,15 @@
 #include <stdio.h>
 #include <unistd.h>
 
-extern "C" {
+
 #include "deepstream_app.h"
-}
 extern "C" {
-    static SaveFullFrameCallback g_save_full_frame_callback = nullptr;
-    void set_save_full_frame_callback(SaveFullFrameCallback cb) {
-        g_save_full_frame_callback = cb;
-    }
+    SaveFullFrameCallback g_save_full_frame_callback = nullptr;
 }
+#ifndef SAVE_FULL_FRAME_CALLBACK_DEFINED
+#define SAVE_FULL_FRAME_CALLBACK_DEFINED
+typedef void (*SaveFullFrameCallback)(GstBuffer* buffer, const char* person_name);
+#endif
 // Thread đồng bộ database 2 lần/ngày
 void* sync_student_db_thread(void* arg) {
     while (1) {
@@ -86,7 +86,7 @@ void* sync_student_db_thread(void* arg) {
         if ((hour == rand_hour && minute == rand_minute) ||
             (hour == (rand_hour + 12) % 24 && minute == rand_minute)) {
             printf("Đang đồng bộ database học sinh...\n");
-            system("python ../scripts/create_db_fr_server.py");
+            system("python3 ./scripts/create_db_fr_server.py");
             sleep(60); // Chờ 1 phút để tránh gọi lặp lại trong cùng phút
         }
 
@@ -510,18 +510,32 @@ static void bbox_generated_probe_after_analytics(AppCtx *appCtx,
 
 
 extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person_name) {
+    // Ensure output directory exists
+    struct stat st = {0};
+    if (stat("pics_log", &st) == -1) {
+        if (mkdir("pics_log", 0755) == -1) {
+            printf("[ERROR] Cannot create pics_log directory!\n");
+            return;
+        }
+    }
     GstMapInfo inmap = GST_MAP_INFO_INIT;
-    if (!gst_buffer_map(frame_buffer, &inmap, GST_MAP_READ)) return;
+    if (!gst_buffer_map(frame_buffer, &inmap, GST_MAP_READ)) {
+        printf("[ERROR] Cannot map GstBuffer!\n");
+        return;
+    }
     NvBufSurface* ip_surf = (NvBufSurface*)inmap.data;
-
-    // Tạo dummy NvDsObjectMeta để lấy full frame
+    if (!ip_surf) {
+        printf("[ERROR] NvBufSurface is NULL!\n");
+        gst_buffer_unmap(frame_buffer, &inmap);
+        return;
+    }
+    // Create dummy NvDsObjectMeta for full frame
     NvDsObjectMeta dummy_obj_meta;
     dummy_obj_meta.rect_params.left = 0;
     dummy_obj_meta.rect_params.top = 0;
     dummy_obj_meta.rect_params.width = ip_surf->surfaceList[0].width;
     dummy_obj_meta.rect_params.height = ip_surf->surfaceList[0].height;
-
-    // Tạo đường dẫn file
+    // Create file path
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
     char timestamp[64];
@@ -530,11 +544,15 @@ extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person
     path += person_name;
     path += "_";
     path += timestamp;
-    path += ".jpg";
-
+    path += ".jpeg";
     unsigned obj_counter = 0;
-    save_image(path, ip_surf, &dummy_obj_meta, nullptr, obj_counter);
-
+    // Save image using DeepStream API
+    bool ok = save_image(path, ip_surf, &dummy_obj_meta, nullptr, obj_counter);
+    if (ok) {
+        printf("[INFO] Saved full frame image: %s\n", path.c_str());
+    } else {
+        printf("[ERROR] Failed to save image: %s\n", path.c_str());
+    }
     gst_buffer_unmap(frame_buffer, &inmap);
 }
 ////////////////
@@ -1013,7 +1031,8 @@ static gboolean recreate_pipeline_thread_func(gpointer arg)
 int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
-    set_save_full_frame_callback(save_full_frame_impl);
+    g_save_full_frame_callback = save_full_frame_impl;
+    g_print("Callback function assigned successfully\n");
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
     GError *error = NULL;
@@ -1312,4 +1331,3 @@ int main(int argc, char *argv[])
     return return_value;
 }
 }
-

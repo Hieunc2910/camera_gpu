@@ -272,12 +272,20 @@ void restart_pipeline(AppCtx *appCtx);
  * @return true if parsed successfully.
  */
 gboolean parse_config_file(NvDsConfig *config, gchar *cfg_file_path);
+#ifndef SAVE_FULL_FRAME_CALLBACK_DEFINED
+#define SAVE_FULL_FRAME_CALLBACK_DEFINED
+typedef void (*SaveFullFrameCallback)(GstBuffer* buffer, const char* person_name);
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef void (*SaveFullFrameCallback)(GstBuffer* frame_buffer, const char* person_name);
-void set_save_full_frame_callback(SaveFullFrameCallback cb);
+// Khai báo extern cho biến global
+extern SaveFullFrameCallback g_save_full_frame_callback;
+
+// Khai báo cho implementation function
+extern void save_full_frame_impl(GstBuffer* buffer, const char* person_name);
 
 #ifdef __cplusplus
 }
