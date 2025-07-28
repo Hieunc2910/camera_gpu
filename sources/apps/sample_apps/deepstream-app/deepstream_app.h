@@ -277,11 +277,7 @@ gboolean parse_config_file(NvDsConfig *config, gchar *cfg_file_path);
 typedef void (*SaveFullFrameCallback)(GstBuffer* buffer, const char* person_name);
 #endif
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-// Khai báo extern cho biến global
+// Khai báo extern cho biến global, chỉ cần 1 lần, không lồng extern "C"
 extern SaveFullFrameCallback g_save_full_frame_callback;
 
 // Khai báo cho implementation function
