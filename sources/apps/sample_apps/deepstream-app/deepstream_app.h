@@ -274,14 +274,14 @@ void restart_pipeline(AppCtx *appCtx);
 gboolean parse_config_file(NvDsConfig *config, gchar *cfg_file_path);
 #ifndef SAVE_FULL_FRAME_CALLBACK_DEFINED
 #define SAVE_FULL_FRAME_CALLBACK_DEFINED
-typedef void (*SaveFullFrameCallback)(GstBuffer* buffer, const char* person_name);
+typedef void (*SaveFullFrameCallback)(GstBuffer* frame_buffer, NvDsFrameMeta* frame_meta, const char* person_name);
 #endif
 
 // Khai báo extern cho biến global, chỉ cần 1 lần, không lồng extern "C"
 extern SaveFullFrameCallback g_save_full_frame_callback;
 
 // Khai báo cho implementation function
-extern void save_full_frame_impl(GstBuffer* buffer, const char* person_name);
+extern void save_full_frame_impl(GstBuffer* frame_buffer, NvDsFrameMeta* frame_meta, const char* person_name);
 
 #ifdef __cplusplus
 }

@@ -129,7 +129,8 @@ static PersonTracker* add_person(const char* name) {
 
 
 /* Hàm ghi log recognition event */
-static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer) {
+static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer,
+                                  NvDsFrameMeta* frame_meta)  {
     JsonParser* parser = NULL;
     JsonNode* root_node = NULL;
     JsonArray* root_array = NULL;
@@ -159,9 +160,9 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
         if (frame_buffer && g_save_full_frame_callback) {
             g_print("=== DEBUG STEP 12: Calling g_save_full_frame_callback ===\n");
             g_print("DEBUG: g_save_full_frame_callback=%p, frame_buffer=%p, person_name=%p\n",
-        g_save_full_frame_callback, frame_buffer, person_name);
-if (person_name) g_print("DEBUG: person_name='%s'\n", person_name);
-            g_save_full_frame_callback(frame_buffer, person_name);
+            g_save_full_frame_callback, frame_buffer, person_name);
+        if (person_name) g_print("DEBUG: person_name='%s'\n", person_name);
+            g_save_full_frame_callback(frame_buffer, frame_meta, person_name);
             g_print("=== DEBUG STEP 13: Callback finished ===\n");
         } else if (!g_save_full_frame_callback) {
             g_print("[WARNING] g_save_full_frame_callback is NULL, cannot save frame!\n");
@@ -181,7 +182,7 @@ if (person_name) g_print("DEBUG: person_name='%s'\n", person_name);
 
             /* Lưu frame cho lần xuất hiện mới */
             if (frame_buffer && g_save_full_frame_callback) {
-                g_save_full_frame_callback(frame_buffer, person_name);
+                g_save_full_frame_callback(frame_buffer, frame_meta, person_name);
             }
         }
     }
@@ -915,7 +916,7 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta, GstBuffer *f
                     str_ins_pos += strlen(str_ins_pos);
                     // Gọi log_recognition_event nếu có tên người
                     if (person_name && strlen(person_name) > 0) {
-                        log_recognition_event(person_name, frame_buffer);
+                        log_recognition_event(person_name, frame_buffer, frame_meta);
                     }
                 }
             }

@@ -56,7 +56,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-
+#include <algorithm>
 #include "deepstream_app.h"
 
 SaveFullFrameCallback g_save_full_frame_callback = nullptr;
@@ -261,6 +261,7 @@ static bool save_image(const std::string &path,
     std::cout << "[DEBUG] nvds_obj_enc_process finished\n";
     return true;
 }
+
 
 gpointer meta_copy_func(gpointer data, gpointer user_data)
 {
@@ -524,9 +525,7 @@ static void bbox_generated_probe_after_analytics(AppCtx *appCtx,
             nvds_obj_enc_finish(g_img_meta_consumer.get_obj_ctx_handle());
     }
 }
-
-
-extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person_name) {
+extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, NvDsFrameMeta* frame_meta, const char* person_name) {
     printf("DEBUG: save_full_frame_impl called with person_name='%s'\n", person_name);
     if (!frame_buffer || !person_name) {
         printf("[ERROR] save_full_frame_impl: buffer or person_name is NULL!\n");
@@ -569,7 +568,7 @@ extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person
     }
     std::string path = "pics_log/" + safe_name + "_" + timestamp + ".jpeg";
     unsigned obj_counter = 0;
-    bool ok = save_image(path, ip_surf, &dummy_obj_meta, nullptr, obj_counter);
+    bool ok = save_image(path, ip_surf, &dummy_obj_meta, frame_meta, obj_counter);
     gst_buffer_unmap(frame_buffer, &inmap); // Always unmap before return!
     if (ok) {
         printf("[INFO] Saved full frame image: %s\n", path.c_str());
@@ -577,6 +576,7 @@ extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person
         printf("[ERROR] Failed to save image: %s\n", path.c_str());
     }
 }
+
 ////////////////
 /* End Custom */
 ////////////////
