@@ -63,8 +63,8 @@ def get_last_updated_local():
 
 def fetch_last_updated_server():
     try:
-        headers = {"Authorization": f"Bearer {TOKEN}"}
-        response = requests.post(LAST_UPDATED_URL, headers=headers, timeout=10)
+        # Không cần token, không cần headers
+        response = requests.post(LAST_UPDATED_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
         last_updated = data.get("data", {}).get("last_updated_at")
@@ -76,15 +76,15 @@ def fetch_last_updated_server():
 
 def fetch_students():
     try:
-        headers = {"Authorization": f"Bearer {TOKEN}"}
+        # Gửi token trong body JSON, không cần headers
         print(f"Đang kết nối tới server: {SYNC_URL}")
-        response = requests.post(SYNC_URL, headers=headers, timeout=30)
+        response = requests.post(SYNC_URL, json={"token": TOKEN}, timeout=30)
         response.raise_for_status()
         data = response.json()
+        print("DEBUG: raw response:", data)
         students = data.get("data", [])
-        filtered_students = [
-            s for s in students if s.get("id") and s.get("full_name")
-        ]
+        print("DEBUG: students from server:", students)
+        filtered_students = students
         if not filtered_students:
             print("Không nhận được dữ liệu học sinh hợp lệ từ server.")
             return
