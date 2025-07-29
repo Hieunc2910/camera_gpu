@@ -64,7 +64,7 @@ def get_last_updated_local():
 def fetch_last_updated_server():
     try:
         headers = {"Authorization": f"Bearer {TOKEN}"}
-        response = requests.post(LAST_UPDATED_URL, headers=headers, timeout=10)
+        response = requests.get(LAST_UPDATED_URL, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         last_updated = data.get("data", {}).get("last_updated_at")
@@ -78,7 +78,7 @@ def fetch_students():
     try:
         headers = {"Authorization": f"Bearer {TOKEN}"}
         print(f"Đang kết nối tới server: {SYNC_URL}")
-        response = requests.post(SYNC_URL, headers=headers, timeout=30)
+        response = requests.get(SYNC_URL, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
         students = data.get("data", [])
