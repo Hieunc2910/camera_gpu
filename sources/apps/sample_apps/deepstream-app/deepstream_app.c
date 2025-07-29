@@ -35,6 +35,20 @@
 #include <unistd.h>
 #include <json-glib/json-glib.h>
 
+#include <sys/time.h>
+#include <curl/curl.h>
+
+#include <glib.h>
+#include <gio/gio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netdb.h>
+
+/* Khai báo extern cho biến callback, không lồng extern "C" */
+extern SaveFullFrameCallback g_save_full_frame_callback;
+
 /* Cấu trúc để theo dõi người đã xuất hiện */
 typedef struct PersonTracker {
     char name[256];
@@ -42,14 +56,12 @@ typedef struct PersonTracker {
     gboolean is_present;
     struct PersonTracker* next;
 } PersonTracker;
-/* Hàm callback để lưu frame đầy đủ */
-static SaveFullFrameCallback g_save_full_frame_callback = NULL;
 /* Danh sách linked list để theo dõi các người */
 static PersonTracker* person_list = NULL;
 static GMutex person_list_mutex;
 
 /* Thời gian timeout (5 phút) */
-#define PRESENCE_TIMEOUT 300  // 5 minutes in seconds
+#define PRESENCE_TIMEOUT 15  // 5 minutes in seconds
 /* Thời gian giữ log (3 ngày) */
 #define LOG_RETENTION_DAYS 3
 #define LOG_RETENTION_SECONDS (LOG_RETENTION_DAYS * 24 * 60 * 60)  // 3 days in seconds
@@ -117,7 +129,8 @@ static PersonTracker* add_person(const char* name) {
 
 
 /* Hàm ghi log recognition event */
-static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer) {
+static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer,
+                                  NvDsFrameMeta* frame_meta)  {
     JsonParser* parser = NULL;
     JsonNode* root_node = NULL;
     JsonArray* root_array = NULL;
@@ -143,8 +156,16 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
         }
 
         /* Lưu frame đầu tiên */
+        g_print("=== DEBUG STEP 11: About to call callback ===\n");
         if (frame_buffer && g_save_full_frame_callback) {
-            g_save_full_frame_callback(frame_buffer, person_name);
+            g_print("=== DEBUG STEP 12: Calling g_save_full_frame_callback ===\n");
+            g_print("DEBUG: g_save_full_frame_callback=%p, frame_buffer=%p, person_name=%p\n",
+            g_save_full_frame_callback, frame_buffer, person_name);
+        if (person_name) g_print("DEBUG: person_name='%s'\n", person_name);
+            g_save_full_frame_callback(frame_buffer, frame_meta, person_name);
+            g_print("=== DEBUG STEP 13: Callback finished ===\n");
+        } else if (!g_save_full_frame_callback) {
+            g_print("[WARNING] g_save_full_frame_callback is NULL, cannot save frame!\n");
         }
 
     } else {
@@ -161,7 +182,7 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
 
             /* Lưu frame cho lần xuất hiện mới */
             if (frame_buffer && g_save_full_frame_callback) {
-                g_save_full_frame_callback(frame_buffer, person_name);
+                g_save_full_frame_callback(frame_buffer, frame_meta, person_name);
             }
         }
     }
@@ -355,13 +376,17 @@ static gboolean cleanup_old_data(gpointer user_data) {
 void initialize_logging_system() {
     g_mutex_init(&person_list_mutex);
 
+    // Kiểm tra callback function
+    if (g_save_full_frame_callback == NULL) {
+        g_print("Warning: g_save_full_frame_callback is not initialized. Frame saving will be disabled.\n");
+    }
+
     /* Tạo timer để cleanup các person không còn xuất hiện (chạy mỗi 30 giây) */
     g_timeout_add_seconds(30, cleanup_absent_persons, NULL);
 
     /* Tạo timer để cleanup log và ảnh cũ (chạy mỗi 6 giờ) */
     g_timeout_add_seconds(6 * 60 * 60, cleanup_old_data, NULL);
 
-    set_save_full_frame_callback(g_save_full_frame_callback);
     /* Chạy cleanup ngay lần đầu để xóa data cũ */
     cleanup_old_logs();
 
@@ -386,6 +411,7 @@ void cleanup_logging_system() {
     g_print("Face recognition logging system cleaned up\n");
 }
 
+#define MAX_STUDENTS 1500
 typedef struct {
     int id;
     char full_name[128];
@@ -395,15 +421,45 @@ StudentInfo students[MAX_STUDENTS];
 int num_students = 0;
 
 void load_labels(const char* filename) {
+    if (!filename) {
+        g_print("Error: Invalid filename provided to load_labels\n");
+        return;
+    }
+
     FILE* f = fopen(filename, "r");
-    if (!f) return;
+    if (!f) {
+        g_print("Error: Cannot open label file: %s\n", filename);
+        return;
+    }
+
     char line[256];
     num_students = 0;
-    while (fgets(line, sizeof(line), f)) {
-        sscanf(line, "%d,%127[^,],%63s", &students[num_students].id, students[num_students].full_name, students[num_students].code_student);
-        num_students++;
+
+    while (fgets(line, sizeof(line), f) && num_students < MAX_STUDENTS) {
+        int id;
+        char name[128], code[64];
+
+        // Thêm kiểm tra định dạng dòng
+        if (strlen(line) < 3) continue; // Bỏ qua dòng trống hoặc quá ngắn
+
+        if (sscanf(line, "%d,%127[^,],%63s", &id, name, code) == 3) {
+            students[num_students].id = id;
+            strncpy(students[num_students].full_name, name, sizeof(students[num_students].full_name) - 1);
+            students[num_students].full_name[sizeof(students[num_students].full_name) - 1] = '\0';
+            strncpy(students[num_students].code_student, code, sizeof(students[num_students].code_student) - 1);
+            students[num_students].code_student[sizeof(students[num_students].code_student) - 1] = '\0';
+            num_students++;
+        } else {
+            g_print("Warning: Invalid line format in label file: %s\n", line);
+        }
     }
+
     fclose(f);
+    g_print("Loaded %d students from label file\n", num_students);
+
+    if (num_students >= MAX_STUDENTS) {
+        g_print("Warning: Reached maximum number of students (%d). Some entries may be ignored.\n", MAX_STUDENTS);
+    }
 }
 
 #define MAX_DISPLAY_LEN 64
@@ -860,7 +916,7 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta, GstBuffer *f
                     str_ins_pos += strlen(str_ins_pos);
                     // Gọi log_recognition_event nếu có tên người
                     if (person_name && strlen(person_name) > 0) {
-                        log_recognition_event(person_name, frame_buffer);
+                        log_recognition_event(person_name, frame_buffer, frame_meta);
                     }
                 }
             }

@@ -56,15 +56,10 @@
 #include <stdio.h>
 #include <unistd.h>
 
-extern "C" {
+#include <algorithm>
 #include "deepstream_app.h"
-}
-extern "C" {
-    static SaveFullFrameCallback g_save_full_frame_callback = nullptr;
-    void set_save_full_frame_callback(SaveFullFrameCallback cb) {
-        g_save_full_frame_callback = cb;
-    }
-}
+
+SaveFullFrameCallback g_save_full_frame_callback = nullptr;
 // Thread đồng bộ database 2 lần/ngày
 void* sync_student_db_thread(void* arg) {
     while (1) {
@@ -86,7 +81,7 @@ void* sync_student_db_thread(void* arg) {
         if ((hour == rand_hour && minute == rand_minute) ||
             (hour == (rand_hour + 12) % 24 && minute == rand_minute)) {
             printf("Đang đồng bộ database học sinh...\n");
-            system("python ../scripts/create_db_fr_server.py");
+            system("python3 ./scripts/create_db_fr_server.py");
             sleep(60); // Chờ 1 phút để tránh gọi lặp lại trong cùng phút
         }
 
@@ -283,11 +278,27 @@ static bool save_image(const std::string &path,
                        NvDsFrameMeta *frame_meta,
                        unsigned &obj_counter)
 {
+    std::cout << "[DEBUG] save_image called\n";
+    std::cout << "[DEBUG] path: " << path << "\n";
+    std::cout << "[DEBUG] ip_surf: " << ip_surf << "\n";
+    std::cout << "[DEBUG] obj_meta: " << obj_meta << "\n";
+    std::cout << "[DEBUG] frame_meta: " << frame_meta << "\n";
+    std::cout << "[DEBUG] obj_counter: " << obj_counter << "\n";
+
+    if (!ip_surf) {
+        std::cerr << "[ERROR] ip_surf is NULL\n";
+        return false;
+    }
+    if (!obj_meta) {
+        std::cerr << "[ERROR] obj_meta is NULL\n";
+        return false;
+    }
+
     NvDsObjEncUsrArgs userData = {0};
     if (path.size() >= sizeof(userData.fileNameImg)) {
-        std::cerr << "Folder path too long (path: " << path << ", size: " << path.size()
+        std::cerr << "[ERROR] Folder path too long (path: " << path << ", size: " << path.size()
                   << ") could not save image.\n"
-                  << "Should be less than " << sizeof(userData.fileNameImg) << " characters.";
+                  << "Should be less than " << sizeof(userData.fileNameImg) << " characters.\n";
         return false;
     }
     userData.saveImg = TRUE;
@@ -297,11 +308,18 @@ static bool save_image(const std::string &path,
     userData.objNum = obj_counter++;
     userData.quality = g_img_meta_consumer.get_quality();
 
+    std::cout << "[DEBUG] userData.fileNameImg: " << userData.fileNameImg << "\n";
+    std::cout << "[DEBUG] userData.objNum: " << userData.objNum << "\n";
+    std::cout << "[DEBUG] userData.quality: " << userData.quality << "\n";
+
     g_img_meta_consumer.init_image_save_library_on_first_time();
+    std::cout << "[DEBUG] Call nvds_obj_enc_process\n";
     nvds_obj_enc_process(g_img_meta_consumer.get_obj_ctx_handle(), &userData, ip_surf, obj_meta,
                          frame_meta);
+    std::cout << "[DEBUG] nvds_obj_enc_process finished\n";
     return true;
 }
+
 
 gpointer meta_copy_func(gpointer data, gpointer user_data)
 {
@@ -565,36 +583,58 @@ static void bbox_generated_probe_after_analytics(AppCtx *appCtx,
             nvds_obj_enc_finish(g_img_meta_consumer.get_obj_ctx_handle());
     }
 }
-
-
-extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, const char* person_name) {
+extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, NvDsFrameMeta* frame_meta, const char* person_name) {
+    printf("DEBUG: save_full_frame_impl called with person_name='%s'\n", person_name);
+    if (!frame_buffer || !person_name) {
+        printf("[ERROR] save_full_frame_impl: buffer or person_name is NULL!\n");
+        return;
+    }
+    struct stat st = {0};
+    if (stat("pics_log", &st) == -1) {
+        if (mkdir("pics_log", 0755) == -1) {
+            printf("[ERROR] Cannot create pics_log directory!\n");
+            return;
+        }
+    }
     GstMapInfo inmap = GST_MAP_INFO_INIT;
-    if (!gst_buffer_map(frame_buffer, &inmap, GST_MAP_READ)) return;
+    if (!gst_buffer_map(frame_buffer, &inmap, GST_MAP_READ)) {
+        printf("[ERROR] Cannot map GstBuffer!\n");
+        return;
+    }
     NvBufSurface* ip_surf = (NvBufSurface*)inmap.data;
-
-    // Tạo dummy NvDsObjectMeta để lấy full frame
+    if (!ip_surf) {
+        printf("[ERROR] NvBufSurface is NULL!\n");
+        gst_buffer_unmap(frame_buffer, &inmap);
+        return;
+    }
     NvDsObjectMeta dummy_obj_meta;
     dummy_obj_meta.rect_params.left = 0;
     dummy_obj_meta.rect_params.top = 0;
     dummy_obj_meta.rect_params.width = ip_surf->surfaceList[0].width;
     dummy_obj_meta.rect_params.height = ip_surf->surfaceList[0].height;
-
-    // Tạo đường dẫn file
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
-    std::string path = "pics_log/";
-    path += person_name;
-    path += "_";
-    path += timestamp;
-    path += ".jpg";
-
+    std::string safe_name;
+    for (const char* p = person_name; *p; ++p) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) {
+            safe_name += *p;
+        } else {
+            safe_name += '_';
+        }
+    }
+    std::string path = "pics_log/" + safe_name + "_" + timestamp + ".jpeg";
     unsigned obj_counter = 0;
-    save_image(path, ip_surf, &dummy_obj_meta, nullptr, obj_counter);
-
-    gst_buffer_unmap(frame_buffer, &inmap);
+    bool ok = save_image(path, ip_surf, &dummy_obj_meta, frame_meta, obj_counter);
+    gst_buffer_unmap(frame_buffer, &inmap); // Always unmap before return!
+    if (ok) {
+        printf("[INFO] Saved full frame image: %s\n", path.c_str());
+    } else {
+        printf("[ERROR] Failed to save image: %s\n", path.c_str());
+    }
 }
+
 ////////////////
 /* End Custom */
 ////////////////
@@ -1072,7 +1112,8 @@ int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
     start_rabbitmq_listener_thread();
-    set_save_full_frame_callback(save_full_frame_impl);
+    g_save_full_frame_callback = save_full_frame_impl;
+    g_print("Callback function assigned successfully\n");
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
     GError *error = NULL;
@@ -1378,5 +1419,4 @@ int main(int argc, char *argv[])
     // ====== CLEANUP SINK POINTERS ======
     if (rtsp_sink1) gst_object_unref(rtsp_sink1);
     return return_value;
-}
 }
