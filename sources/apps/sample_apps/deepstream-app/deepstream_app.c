@@ -21,7 +21,10 @@
  */
 
 #include "deepstream_app.h"
+#include "nvbufsurface.h"
+#include "nvbufsurftransform.h"
 
+#include <cuda_runtime.h>
 #include <gst/gst.h>
 #include <math.h>
 #include <stdlib.h>
@@ -46,37 +49,62 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 
-/* Khai báo extern cho biến callback, không lồng extern "C" */
-extern SaveFullFrameCallback g_save_full_frame_callback;
+static const char* get_color_format_str(NvBufSurfaceColorFormat format) {
+    switch (format) {
+        case NVBUF_COLOR_FORMAT_RGBA: return "RGBA";
+        case NVBUF_COLOR_FORMAT_RGB: return "RGB";
+        case NVBUF_COLOR_FORMAT_NV12: return "NV12";
+        case NVBUF_COLOR_FORMAT_NV21: return "NV21";
+        case NVBUF_COLOR_FORMAT_BGR: return "BGR";
+        case NVBUF_COLOR_FORMAT_GRAY8: return "GRAY8";
+        default: return "UNKNOWN";
+    }
+}
+static const char base64_chars[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+
+static void initialize_camera_info(AppCtx* appCtx);
+const char* get_student_id_from_name(const char* name);
+static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* frame_meta);
 /* Cấu trúc để theo dõi người đã xuất hiện */
 typedef struct PersonTracker {
     char name[256];
-    time_t last_seen;
+    time_t last_log_time;
     gboolean is_present;
     struct PersonTracker* next;
 } PersonTracker;
 /* Danh sách linked list để theo dõi các người */
 static PersonTracker* person_list = NULL;
 static GMutex person_list_mutex;
+// Thay đổi cấu trúc StudentInfo
+#define MAX_STUDENTS 2000
+typedef struct {
+    int id;
+    char full_name[128];
+} StudentInfo;
+StudentInfo students[MAX_STUDENTS];
+int num_students = 0;
 
-/* Thời gian timeout (5 phút) */
-#define PRESENCE_TIMEOUT 15  // 5 minutes in seconds
-/* Thời gian giữ log (3 ngày) */
+// Thêm cấu trúc để lưu thông tin camera
+typedef struct {
+    char ip_address[64];
+    char mac_address[64];
+    guint source_id;
+} CameraInfo;
+
+// Thêm array để lưu thông tin camera cho mỗi source
+#define MAX_CAMERAS 200
+static CameraInfo camera_info[MAX_CAMERAS];
+static gboolean camera_info_initialized = FALSE;
+// Hàm lấy địa chỉ IP từ URL RTSP
+/* Thời gian timeout  */
+#define PRESENCE_TIMEOUT 5
+/* Thời gian gi��� log (3 ngày) */
 #define LOG_RETENTION_DAYS 3
 #define LOG_RETENTION_SECONDS (LOG_RETENTION_DAYS * 24 * 60 * 60)  // 3 days in seconds
 
-/* Hàm tạo thư mục nếu chưa tồn tại */
-static gboolean create_directory_if_not_exists(const char* path) {
-    struct stat st = {0};
-    if (stat(path, &st) == -1) {
-        if (mkdir(path, 0755) == -1) {
-            g_print("Error: Cannot create directory %s\n", path);
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
+
 
 /* Hàm tạo file log.json nếu chưa có */
 static gboolean create_log_file_if_not_exists(const char* filename) {
@@ -119,7 +147,7 @@ static PersonTracker* add_person(const char* name) {
 
     strncpy(new_person->name, name, sizeof(new_person->name) - 1);
     new_person->name[sizeof(new_person->name) - 1] = '\0';
-    new_person->last_seen = time(NULL);
+    new_person->last_log_time  = time(NULL);
     new_person->is_present = TRUE;
     new_person->next = person_list;
     person_list = new_person;
@@ -127,10 +155,20 @@ static PersonTracker* add_person(const char* name) {
     return new_person;
 }
 
-
-/* Hàm ghi log recognition event */
-static void log_recognition_event(const char* person_name, GstBuffer* frame_buffer,
-                                  NvDsFrameMeta* frame_meta)  {
+const char* get_student_id_from_name(const char* person_name) {
+    static char id[16];
+    if (!person_name) return NULL;
+    const char* comma = strchr(person_name, ',');
+    if (!comma) return NULL;
+    size_t len = comma - person_name;
+    if (len >= sizeof(id)) len = sizeof(id) - 1;
+    strncpy(id, person_name, len);
+    id[len] = '\0';
+    return id;
+}
+/* Hàm ghi log recognition event với thông tin mới */
+static void log_recognition_event(const char* person_name, NvBufSurface* surface,
+                                  NvDsFrameMeta* frame_meta, NvDsObjectMeta* obj_meta)  {
     JsonParser* parser = NULL;
     JsonNode* root_node = NULL;
     JsonArray* root_array = NULL;
@@ -148,45 +186,25 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
     PersonTracker* person = find_person(person_name);
 
     if (person == NULL) {
-        /* Người mới, thêm vào danh sách và ghi log */
+        // Người mới, thêm vào danh sách và ghi log
         person = add_person(person_name);
         if (person == NULL) {
             g_mutex_unlock(&person_list_mutex);
             return;
         }
-
-        /* Lưu frame đầu tiên */
-        g_print("=== DEBUG STEP 11: About to call callback ===\n");
-        if (frame_buffer && g_save_full_frame_callback) {
-            g_print("=== DEBUG STEP 12: Calling g_save_full_frame_callback ===\n");
-            g_print("DEBUG: g_save_full_frame_callback=%p, frame_buffer=%p, person_name=%p\n",
-            g_save_full_frame_callback, frame_buffer, person_name);
-        if (person_name) g_print("DEBUG: person_name='%s'\n", person_name);
-            g_save_full_frame_callback(frame_buffer, frame_meta, person_name);
-            g_print("=== DEBUG STEP 13: Callback finished ===\n");
-        } else if (!g_save_full_frame_callback) {
-            g_print("[WARNING] g_save_full_frame_callback is NULL, cannot save frame!\n");
-        }
-
+        // Log lần đầu tiên
+    } else if (person->is_present == FALSE) {
+        // Người này đã vắng mặt đủ lâu, giờ xuất hiện lại => log
+        person->is_present = TRUE;
+        person->last_log_time = current_time;
+        // Log lần quay lại
     } else {
-        /* Kiểm tra xem đã quá 5 phút chưa */
-        if (current_time - person->last_seen < PRESENCE_TIMEOUT && person->is_present) {
-            /* Vẫn còn trong khoảng thời gian, chỉ cập nhật last_seen */
-            person->last_seen = current_time;
-            g_mutex_unlock(&person_list_mutex);
-            return;
-        } else {
-            /* Đã quá 5 phút hoặc người này đã được đánh dấu là không có mặt */
-            person->last_seen = current_time;
-            person->is_present = TRUE;
-
-            /* Lưu frame cho lần xuất hiện mới */
-            if (frame_buffer && g_save_full_frame_callback) {
-                g_save_full_frame_callback(frame_buffer, frame_meta, person_name);
-            }
-        }
+        // Người này vẫn đang hiện diện, chỉ cập nhật last_log_time, KHÔNG log
+        person->last_log_time = current_time;
+        g_mutex_unlock(&person_list_mutex);
+        return;
     }
-
+    // Đủ điều kiện log (mới hoặc vừa quay lại sau khi vắng mặt)
     g_mutex_unlock(&person_list_mutex);
 
     /* Tạo file log.json nếu chưa có */
@@ -220,8 +238,39 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
     time_info = localtime(&current_time);
     strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d %H:%M:%S", time_info);
 
-    json_object_set_string_member(new_entry, "name", person_name);
+    // Lấy student_id thay vì sử dụng tên
+    const char* student_id = get_student_id_from_name(person_name);
+    if (!student_id) {
+        student_id = "UNKNOWN";
+    }
+
+    // Lấy thông tin camera dựa trên source_id
+    guint source_id = frame_meta ? frame_meta->pad_index : 0;
+    const char* ip_address = "unknown";
+    const char* mac_address = "unknown";
+
+    if (source_id < MAX_CAMERAS && camera_info_initialized) {
+        ip_address = camera_info[source_id].ip_address;
+        mac_address = camera_info[source_id].mac_address;
+    }
+
+    char* full_frame_base64 = NULL;
+    if (surface && frame_meta) {
+        full_frame_base64 = encode_full_frame_base64(surface, frame_meta);
+    }
+
+    // Thêm các trường mới vào JSON
+    json_object_set_string_member(new_entry, "student_id", student_id);
     json_object_set_string_member(new_entry, "timestamp", timestamp_str);
+    json_object_set_string_member(new_entry, "ip_address", ip_address);
+    json_object_set_string_member(new_entry, "mac_address", mac_address);
+
+    if (full_frame_base64) {
+    json_object_set_string_member(new_entry, "face_image", full_frame_base64);
+        free(full_frame_base64);
+    } else {
+        json_object_set_string_member(new_entry, "face_image", "");
+    }
 
     /* Thêm vào array */
     JsonNode* entry_node = json_node_new(JSON_NODE_OBJECT);
@@ -237,7 +286,8 @@ static void log_recognition_event(const char* person_name, GstBuffer* frame_buff
         g_print("Error writing to log.json: %s\n", error->message);
         g_error_free(error);
     } else {
-        g_print("Logged recognition event: %s at %s\n", person_name, timestamp_str);
+        g_print("Logged recognition event: %s (ID: %s) at %s from IP: %s\n",
+                person_name, student_id, timestamp_str, ip_address);
     }
 
     /* Cleanup */
@@ -355,7 +405,7 @@ static gboolean cleanup_absent_persons(gpointer user_data) {
     current = person_list;
 
     while (current != NULL) {
-        if (current->is_present && (current_time - current->last_seen) >= PRESENCE_TIMEOUT) {
+        if (current->is_present && (current_time - current->last_log_time ) >= PRESENCE_TIMEOUT) {
             current->is_present = FALSE;
             g_print("Person %s marked as absent\n", current->name);
         }
@@ -373,13 +423,15 @@ static gboolean cleanup_old_data(gpointer user_data) {
 }
 
 
-void initialize_logging_system() {
+void initialize_logging_system(AppCtx* appCtx) {
+    if (!create_log_file_if_not_exists("log.json")) {
+        return;
+    }
     g_mutex_init(&person_list_mutex);
 
-    // Kiểm tra callback function
-    if (g_save_full_frame_callback == NULL) {
-        g_print("Warning: g_save_full_frame_callback is not initialized. Frame saving will be disabled.\n");
-    }
+    // Khởi tạo thông tin camera
+    initialize_camera_info(appCtx);
+
 
     /* Tạo timer để cleanup các person không còn xuất hiện (chạy mỗi 30 giây) */
     g_timeout_add_seconds(30, cleanup_absent_persons, NULL);
@@ -398,6 +450,8 @@ void cleanup_logging_system() {
     PersonTracker* current = person_list;
     PersonTracker* next;
 
+
+
     g_mutex_lock(&person_list_mutex);
     while (current != NULL) {
         next = current->next;
@@ -411,14 +465,125 @@ void cleanup_logging_system() {
     g_print("Face recognition logging system cleaned up\n");
 }
 
-#define MAX_STUDENTS 1500
-typedef struct {
-    int id;
-    char full_name[128];
-    char code_student[64];
-} StudentInfo;
-StudentInfo students[MAX_STUDENTS];
-int num_students = 0;
+
+static gboolean extract_ip_from_rtsp_url(const char* rtsp_url, char* ip_buffer, size_t buffer_size) {
+    if (!rtsp_url || !ip_buffer || buffer_size == 0) {
+        return FALSE;
+    }
+
+    // Tìm "://" trong URL
+    const char* start = strstr(rtsp_url, "://");
+    if (!start) {
+        return FALSE;
+    }
+    start += 3; // Bỏ qua "://"
+
+    // Tìm '@' nếu có (user:pass@ip:port)
+    const char* at_pos = strchr(start, '@');
+    if (at_pos) {
+        start = at_pos + 1;
+    }
+
+    // Tìm ':' hoặc '/' để kết thúc IP
+    const char* end = strchr(start, ':');
+    const char* slash = strchr(start, '/');
+
+    if (!end || (slash && slash < end)) {
+        end = slash;
+    }
+
+    if (!end) {
+        end = start + strlen(start);
+    }
+
+    size_t ip_len = end - start;
+    if (ip_len >= buffer_size) {
+        return FALSE;
+    }
+
+    strncpy(ip_buffer, start, ip_len);
+    ip_buffer[ip_len] = '\0';
+
+    return TRUE;
+}
+
+// Hàm lấy MAC address từ IP (cần có quyền truy cập ARP table)
+static gboolean get_mac_from_ip(const char* ip_address, char* mac_buffer, size_t buffer_size) {
+    if (!ip_address || !mac_buffer || buffer_size < 18) {
+        return FALSE;
+    }
+
+    char command[256];
+    snprintf(command, sizeof(command), "arp -n %s 2>/dev/null | awk 'NR==2{print $3}'", ip_address);
+
+    FILE* fp = popen(command, "r");
+    if (!fp) {
+        // Nếu không lấy được, tạo MAC giả từ IP
+        snprintf(mac_buffer, buffer_size, "00:00:00:%02x:%02x:%02x",
+                 (unsigned char)(rand() % 256),
+                 (unsigned char)(rand() % 256),
+                 (unsigned char)(rand() % 256));
+        return FALSE;
+    }
+
+    if (fgets(mac_buffer, buffer_size, fp) != NULL) {
+        // Xóa newline
+        char* newline = strchr(mac_buffer, '\n');
+        if (newline) *newline = '\0';
+
+        // Kiểm tra định dạng MAC
+        if (strlen(mac_buffer) >= 17) {
+            pclose(fp);
+            return TRUE;
+        }
+    }
+
+    pclose(fp);
+
+    // Nếu không lấy được MAC thực, tạo MAC giả
+    snprintf(mac_buffer, buffer_size, "00:00:00:%02x:%02x:%02x",
+             (unsigned char)(rand() % 256),
+             (unsigned char)(rand() % 256),
+             (unsigned char)(rand() % 256));
+    return FALSE;
+}
+
+// Hàm khởi tạo thông tin camera
+static void initialize_camera_info(AppCtx* appCtx) {
+    if (camera_info_initialized) {
+        return;
+    }
+
+    NvDsConfig* config = &appCtx->config;
+
+    for (guint i = 0; i < config->num_source_sub_bins && i < MAX_CAMERAS; i++) {
+        camera_info[i].source_id = i;
+
+        // Lấy IP từ URI
+        if (config->multi_source_config[i].uri) {
+            if (!extract_ip_from_rtsp_url(config->multi_source_config[i].uri,
+                                         camera_info[i].ip_address,
+                                         sizeof(camera_info[i].ip_address))) {
+                snprintf(camera_info[i].ip_address, sizeof(camera_info[i].ip_address),
+                        "192.168.1.%d", (int)(100 + i));
+            }
+        } else {
+            snprintf(camera_info[i].ip_address, sizeof(camera_info[i].ip_address),
+                    "192.168.1.%d", (int)(100 + i));
+        }
+
+        // Lấy MAC address
+        get_mac_from_ip(camera_info[i].ip_address,
+                       camera_info[i].mac_address,
+                       sizeof(camera_info[i].mac_address));
+
+        g_print("Camera %d: IP=%s, MAC=%s\n", i,
+                camera_info[i].ip_address,
+                camera_info[i].mac_address);
+    }
+
+    camera_info_initialized = TRUE;
+}
 
 void load_labels(const char* filename) {
     if (!filename) {
@@ -446,8 +611,6 @@ void load_labels(const char* filename) {
             students[num_students].id = id;
             strncpy(students[num_students].full_name, name, sizeof(students[num_students].full_name) - 1);
             students[num_students].full_name[sizeof(students[num_students].full_name) - 1] = '\0';
-            strncpy(students[num_students].code_student, code, sizeof(students[num_students].code_student) - 1);
-            students[num_students].code_student[sizeof(students[num_students].code_student) - 1] = '\0';
             num_students++;
         } else {
             g_print("Warning: Invalid line format in label file: %s\n", line);
@@ -765,8 +928,7 @@ static void write_kitti_track_output(AppCtx *appCtx, NvDsBatchMeta *batch_meta)
     if (!appCtx->config.kitti_track_dir_path)
         return;
 
-    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-         l_frame = l_frame->next) {
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
         NvDsFrameMeta *frame_meta = l_frame->data;
         guint stream_id = frame_meta->pad_index;
         g_snprintf(bbox_file, sizeof(bbox_file) - 1, "%s/%02u_%03u_%06lu.txt",
@@ -913,16 +1075,15 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta, GstBuffer *f
                         sprintf(str_ins_pos, " %s", label->result_label);
                         person_name = label->result_label;
                     }
+
                     str_ins_pos += strlen(str_ins_pos);
-                    // Gọi log_recognition_event nếu có tên người
-                    if (person_name && strlen(person_name) > 0) {
-                        log_recognition_event(person_name, frame_buffer, frame_meta);
+
                     }
                 }
             }
         }
     }
-}
+
 
 /**
  * Function which processes the inferred buffer and its metadata.
@@ -995,9 +1156,58 @@ static GstPadProbeReturn gie_processing_done_buf_prob(GstPad *pad,
 
     if (gst_buffer_is_writable(buf))
         process_buffer(buf, appCtx, index);
+
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buf);
+    if (!batch_meta) return GST_PAD_PROBE_OK;
+
+    GstMapInfo in_map_info;
+    NvBufSurface *surface = NULL;
+    gboolean buffer_mapped = FALSE;
+
+    if (gst_buffer_map(buf, &in_map_info, GST_MAP_READ)) {
+        surface = (NvBufSurface *)in_map_info.data;
+        buffer_mapped = TRUE;
+
+    } else {
+        g_print("[ERROR] Failed to map buffer\n");
+    }
+
+    // ✅ PROCESS TẤT CẢ NGƯỜI TRONG BATCH - NHƯNG TRÁNH TRÙNG LẶP
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+
+            for (NvDsMetaList *l_class = obj->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
+                NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *)l_class->data;
+
+                for (NvDsMetaList *l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
+                    NvDsLabelInfo *label = (NvDsLabelInfo *)l_label->data;
+
+                    const char *person_name = NULL;
+                    if (label->pResult_label) {
+                        person_name = label->pResult_label;
+                    } else if (label->result_label[0] != '\0') {
+                        person_name = label->result_label;
+                    }
+
+                    // ✅ CHỈ LOG KHI CÓ TÊN NGƯỜI VÀ SURFACE HỢP LỆ
+                    if (person_name && strlen(person_name) > 0 && surface) {
+                        log_recognition_event(person_name, surface, frame_meta, obj);
+                    }
+                }
+            }
+        }
+    }
+
+    // ✅ UNMAP BUFFER
+    if (buffer_mapped) {
+        gst_buffer_unmap(buf, &in_map_info);
+    }
+
     return GST_PAD_PROBE_OK;
 }
-
 /**
  * Buffer probe function after tracker.
  */
@@ -1010,14 +1220,11 @@ static GstPadProbeReturn analytics_done_buf_prob(GstPad *pad,
     AppCtx *appCtx = bin->appCtx;
     GstBuffer *buf = (GstBuffer *)info->data;
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buf);
+
     if (!batch_meta) {
-        NVGSTDS_WARN_MSG_V("Batch meta not found for buffer %p", buf);
         return GST_PAD_PROBE_OK;
     }
 
-    /*
-     * Output KITTI labels with tracking ID if configured to do so.
-     */
     write_kitti_track_output(appCtx, batch_meta);
     if (appCtx->config.tracker_config.enable_past_frame) {
         write_kitti_past_track_output(appCtx, batch_meta);
@@ -1025,6 +1232,7 @@ static GstPadProbeReturn analytics_done_buf_prob(GstPad *pad,
     if (appCtx->bbox_generated_post_analytics_cb) {
         appCtx->bbox_generated_post_analytics_cb(appCtx, buf, batch_meta, index);
     }
+
     return GST_PAD_PROBE_OK;
 }
 
@@ -1313,7 +1521,7 @@ static gboolean create_processing_instance(AppCtx *appCtx, guint index)
     NVGSTDS_BIN_ADD_GHOST_PAD(instance_bin->bin, last_elem, "sink");
     if (config->osd_config.enable) {
         NVGSTDS_ELEM_ADD_PROBE(instance_bin->all_bbox_buffer_probe_id, instance_bin->osd_bin.nvosd,
-                               "sink", gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
+                               "src", gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
                                instance_bin);
     } else {
         NVGSTDS_ELEM_ADD_PROBE(instance_bin->all_bbox_buffer_probe_id, instance_bin->sink_bin.bin,
@@ -1526,7 +1734,7 @@ gboolean create_pipeline(AppCtx *appCtx,
         goto done;
     }
     // Khởi tạo hệ thống logging nhận diện khuôn mặt
-    initialize_logging_system();
+    initialize_logging_system(appCtx);
     g_print("Face recognition logging system initialized\n");
 
     bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline->pipeline));
@@ -1854,6 +2062,20 @@ gboolean create_pipeline(AppCtx *appCtx,
     g_mutex_init(&appCtx->app_lock);
     g_cond_init(&appCtx->app_cond);
     g_mutex_init(&appCtx->latency_lock);
+    GstElement *osd_elem = appCtx->pipeline.common_elements.osd_bin.nvosd;
+    if (!osd_elem) {
+        g_printerr("[ERROR] Không tìm thấy phần tử nvdsosd trong pipeline!\n");
+    } else {
+        GstPad *osd_src_pad = gst_element_get_static_pad(osd_elem, "src");
+        if (!osd_src_pad) {
+            g_printerr("[ERROR] Không lấy được src pad từ nvdsosd\n");
+        } else {
+            gst_pad_add_probe(osd_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+                              gie_processing_done_buf_prob, (gpointer)appCtx, NULL);
+            g_print("[INFO] Đã gắn probe tại nvdsosd:src để lấy frame có overlay\n");
+            gst_object_unref(osd_src_pad);
+        }
+    }
 
     ret = TRUE;
 done:
@@ -1915,7 +2137,7 @@ void destroy_pipeline(AppCtx *appCtx)
     for (i = 0; i < appCtx->config.num_source_sub_bins; i++) {
         NvDsInstanceBin *bin = &appCtx->pipeline.instance_bins[i];
         if (config->osd_config.enable) {
-            NVGSTDS_ELEM_REMOVE_PROBE(bin->all_bbox_buffer_probe_id, bin->osd_bin.nvosd, "sink");
+            NVGSTDS_ELEM_REMOVE_PROBE(bin->all_bbox_buffer_probe_id, bin->osd_bin.nvosd, "src");
         } else {
             NVGSTDS_ELEM_REMOVE_PROBE(bin->all_bbox_buffer_probe_id, bin->sink_bin.bin, "sink");
         }
@@ -2001,4 +2223,214 @@ gboolean resume_pipeline(AppCtx *appCtx)
     } else {
         return FALSE;
     }
+}
+
+static char* base64_encode(const unsigned char* data, size_t input_length) {
+    if (!data || input_length == 0) {
+        return NULL;
+    }
+
+    size_t output_length = 4 * ((input_length + 2) / 3);
+    char* encoded_data = (char*)malloc(output_length + 1);
+    if (!encoded_data) {
+        return NULL;
+    }
+
+    for (size_t i = 0, j = 0; i < input_length;) {
+        uint32_t octet_a = i < input_length ? data[i++] : 0;
+        uint32_t octet_b = i < input_length ? data[i++] : 0;
+        uint32_t octet_c = i < input_length ? data[i++] : 0;
+
+        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+
+        encoded_data[j++] = base64_chars[(triple >> 3 * 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 2 * 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 1 * 6) & 0x3F];
+        encoded_data[j++] = base64_chars[(triple >> 0 * 6) & 0x3F];
+    }
+
+    // Padding
+    int padding = input_length % 3;
+    if (padding) {
+        for (int i = 0; i < 3 - padding; i++) {
+            encoded_data[output_length - 1 - i] = '=';
+        }
+    }
+
+    encoded_data[output_length] = '\0';
+    return encoded_data;
+}
+
+static NvBufSurfaceMemType get_actual_memory_type(NvBufSurface* surface) {
+    if (surface->memType != NVBUF_MEM_DEFAULT) {
+        return surface->memType;
+    }
+
+    // NVBUF_MEM_DEFAULT sẽ map thành:
+    // - NVBUF_MEM_CUDA_DEVICE cho dGPU (desktop GPU)
+    // - NVBUF_MEM_SURFACE_ARRAY cho Jetson
+
+    // Kiểm tra CUDA device để xác định platform
+    int device_count = 0;
+    cudaError_t cuda_status = cudaGetDeviceCount(&device_count);
+
+    if (cuda_status == cudaSuccess && device_count > 0) {
+        struct cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
+
+        // Jetson devices có integrated memory
+        if (prop.integrated) {
+            return NVBUF_MEM_SURFACE_ARRAY;
+        } else {
+            return NVBUF_MEM_CUDA_DEVICE;
+        }
+    }
+
+    // Fallback: assume desktop GPU
+    return NVBUF_MEM_CUDA_DEVICE;
+}
+
+static char* copy_gpu_data_to_host(NvBufSurface* surface, guint batch_id) {
+    if (!surface || batch_id >= surface->numFilled) {
+        return NULL;
+    }
+
+    NvBufSurfaceParams* params = &surface->surfaceList[batch_id];
+
+    if (params->colorFormat != NVBUF_COLOR_FORMAT_RGBA) {
+        return NULL;
+    }
+
+    size_t frame_size = params->width * params->height * 4;
+    char* host_buffer = (char*)malloc(frame_size);
+    if (!host_buffer) {
+        g_print("[ERROR] Failed to allocate host buffer\n");
+        return NULL;
+    }
+
+    // Use cudaMemcpy for device memory
+    cudaError_t err = cudaMemcpy(host_buffer, params->dataPtr, frame_size, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        g_print("[ERROR] cudaMemcpy failed: %s\n", cudaGetErrorString(err));
+        free(host_buffer);
+        return NULL;
+    }
+
+    return host_buffer;
+}
+
+static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* frame_meta) {
+    if (!surface || !frame_meta) {
+        g_print("[DEBUG] Invalid surface or frame_meta\n");
+        return NULL;
+    }
+
+    guint batch_id = frame_meta->batch_id;
+    if (batch_id >= surface->numFilled) {
+        batch_id = 0;
+    }
+
+    NvBufSurfaceParams* params = &surface->surfaceList[batch_id];
+
+    // ✅ CHỈ XỬ LÝ RGBA FORMAT
+    if (params->colorFormat != NVBUF_COLOR_FORMAT_RGBA) {
+        g_print("[DEBUG] Skipping non-RGBA format: %s\n", get_color_format_str(params->colorFormat));
+        return NULL;
+    }
+
+
+
+    char* result = NULL;
+    char* host_data = NULL;
+    NvBufSurface* cuda_surface = NULL;
+    gboolean need_cleanup = FALSE;
+
+    // ✅ XỬ LÝ THEO MEMORY TYPE
+    switch (surface->memType) {
+        case NVBUF_MEM_DEFAULT: {
+            NvBufSurfaceMemType actual_type = get_actual_memory_type(surface);
+
+            if (actual_type == NVBUF_MEM_CUDA_DEVICE) {
+                // ✅ PHƯƠNG PHÁP 1: Copy trực tiếp từ GPU memory
+                host_data = copy_gpu_data_to_host(surface, batch_id);
+                if (host_data) {
+                    size_t frame_size = params->width * params->height * 4;
+                    result = base64_encode((unsigned char*)host_data, frame_size);
+                    free(host_data);
+
+                    return result;
+                }
+
+            } else {
+                // Jetson: NVBUF_MEM_SURFACE_ARRAY - có thể map trực tiếp
+                if (NvBufSurfaceMap(surface, batch_id, 0, NVBUF_MAP_READ) == 0) {
+                    if (params->dataPtr) {
+                        size_t frame_size = params->width * params->height * 4;
+                        result = base64_encode((unsigned char*)params->dataPtr, frame_size);
+
+                    }
+                    NvBufSurfaceUnMap(surface, batch_id, 0);
+                }
+            }
+            break;
+        }
+
+        case NVBUF_MEM_CUDA_PINNED:
+        case NVBUF_MEM_CUDA_UNIFIED: {
+            // Các loại memory này có thể map được
+            if (NvBufSurfaceMap(surface, batch_id, 0, NVBUF_MAP_READ) == 0) {
+                NvBufSurfaceSyncForCpu(surface, batch_id, 0);
+
+                if (params->dataPtr) {
+                    size_t frame_size = params->width * params->height * 4;
+                    result = base64_encode((unsigned char*)params->dataPtr, frame_size);
+                    g_print("[DEBUG] Successfully encoded from CUDA memory\n");
+                }
+
+                NvBufSurfaceUnMap(surface, batch_id, 0);
+            }
+            break;
+        }
+
+        case NVBUF_MEM_CUDA_DEVICE: {
+            // Pure GPU memory - cần copy về host
+            host_data = copy_gpu_data_to_host(surface, batch_id);
+            if (host_data) {
+                size_t frame_size = params->width * params->height * 4;
+                result = base64_encode((unsigned char*)host_data, frame_size);
+                free(host_data);
+
+            }
+            break;
+        }
+
+        case NVBUF_MEM_SURFACE_ARRAY: {
+            // Jetson native memory - có thể map trực tiếp
+            if (NvBufSurfaceMap(surface, batch_id, 0, NVBUF_MAP_READ) == 0) {
+                if (params->dataPtr) {
+                    size_t frame_size = params->width * params->height * 4;
+                    result = base64_encode((unsigned char*)params->dataPtr, frame_size);
+                    g_print("[DEBUG] Successfully encoded from surface array\n");
+                }
+                NvBufSurfaceUnMap(surface, batch_id, 0);
+            }
+            break;
+        }
+
+        default: {
+            g_print("[ERROR] Unsupported memory type: %d\n", surface->memType);
+            break;
+        }
+    }
+
+    // Cleanup transformed surface nếu có
+    if (need_cleanup && cuda_surface) {
+        NvBufSurfaceDestroy(cuda_surface);
+    }
+
+    if (!result) {
+        g_print("[ERROR] Failed to encode frame - all methods failed\n");
+    }
+
+    return result;
 }
