@@ -9,13 +9,15 @@ import sys
 import threading
 import logging
 from urllib.parse import urlparse
-import psutil
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-RABBITMQ_HOST = 'localhost'
+RABBITMQ_HOST = 'rabitmq.phoenixtech.vn'
+RABBITMQ_PORT = 5672
+RABBITMQ_USER = 'guest'
+RABBITMQ_PASS = 'guest'
 QUEUE_NAME = 'stream_command'
 RESPONSE_QUEUE = 'stream_response'
 JETSON_ID = os.environ.get("JETSON_ID", "jetson01")
@@ -260,7 +262,7 @@ class RabbitMQController:
                 exchange='',
                 routing_key=RESPONSE_QUEUE,
                 body=json.dumps(response),
-                properties=pika.BasicProperties(delivery_mode=2)  # Make message persistent
+                properties=pika.BasicProperties(delivery_mode=2)
             )
             logger.info(f"Response sent: {response}")
         except Exception as e:
@@ -346,6 +348,8 @@ class RabbitMQController:
                 self.connection = pika.BlockingConnection(
                     pika.ConnectionParameters(
                         host=RABBITMQ_HOST,
+                        port=RABBITMQ_PORT,
+                        credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
                         heartbeat=600,
                         blocked_connection_timeout=300
                     )
