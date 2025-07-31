@@ -34,7 +34,7 @@
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
-
+#include "deepstream_app_exports.h"
 #include "deepstream_config_file_parser.h"
 #include "nvds_version.h"
 /////////////////
