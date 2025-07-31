@@ -11,7 +11,7 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, full_name, code_student, vector_face FROM students ORDER BY id ASC")
+        cursor.execute("SELECT id, label,vector_face FROM students ORDER BY id ASC")
         rows = cursor.fetchall()
         conn.close()
 
@@ -27,16 +27,16 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
 
         labels = []
         encodings = []
-        for id, full_name, code_student, vector_face in rows:
-            print(f"Raw vector_face for {full_name}: {vector_face}")  # Debug print
+        for id, label,  vector_face in rows:
+            print(f"Raw vector_face for {label}: {vector_face}")  # Debug print
             if not vector_face or vector_face == "null":
                 continue
             try:
                 encoding_np = np.array(json.loads(vector_face), dtype=np.float32)
-                labels.append((id, full_name, code_student))
+                labels.append((id, label))
                 encodings.append(encoding_np)
             except Exception as e:
-                print(f"Error parsing vector_face for {full_name}: {e}")
+                print(f"Error parsing vector_face for {label}: {e}")
 
         if not encodings:
             print("No valid encodings found.")
@@ -66,8 +66,8 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
         print(f"FAISS index saved to: {faiss_path}")
 
         with open(labels_path, "w") as f:
-            for id, full_name, code_student in labels:
-                f.write(f"{id},{full_name},{code_student}\n")
+            for id, label in labels:
+                f.write(f"{id},{label}\n")
         print(f"Labels saved to: {labels_path}")
 
         return True
@@ -78,7 +78,7 @@ def populate_faiss_from_db(db_path="students_local.db", faiss_path="faiss.index"
 
 if __name__ == "__main__":
     populate_faiss_from_db(
-        db_path="../students_local.db",
+        db_path="./students_local.db",
         faiss_path="./faiss.index",
         labels_path="./labels.txt"
     )
