@@ -612,7 +612,7 @@ void signal_handler(int signum) {
     exit(0);
 }
 
-int main() {
+int rabbitmq_listener_main() {
     // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);

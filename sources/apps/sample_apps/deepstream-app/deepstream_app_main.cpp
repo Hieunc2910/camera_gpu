@@ -99,21 +99,11 @@ void start_student_db_sync_thread() {
 /////////////////
 /* Start Custom */
 /////////////////
-// Thread chạy RabbitMQ listener
-void* rabbitmq_listener_thread(void* arg) {
-    while (1) {
-        // Chạy script nhận lệnh, nếu script kết thúc thì tự động restart sau 10 giây
-        system("python3 ../scripts/rabbitmq_listener.py");
-        sleep(10);
-    }
-    return NULL;
-}
-
-// Gọi hàm này ở đầu hàm main để khởi động thread nền RabbitMQ
-void start_rabbitmq_listener_thread() {
-    pthread_t tid;
-    pthread_create(&tid, NULL, rabbitmq_listener_thread, NULL);
-    pthread_detach(tid);
+// Hàm khởi động thread cho RabbitMQ listener C++
+void start_rabbitmq_listener_cpp_thread() {
+    std::thread([](){
+        rabbitmq_listener_main();
+    }).detach();
 }
 // ====== GLOBAL SINK POINTERS FOR DYNAMIC ENABLE/DISABLE ======
 GstElement* rtsp_sink1 = nullptr;
@@ -1035,8 +1025,8 @@ static gboolean recreate_pipeline_thread_func(gpointer arg)
 int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
-    start_rabbitmq_listener_thread();
-
+    start_rabbitmq_listener_cpp_thread();
+    
     g_print("Callback function assigned successfully\n");
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
