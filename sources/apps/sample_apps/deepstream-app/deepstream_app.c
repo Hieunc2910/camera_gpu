@@ -293,6 +293,55 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
     /* Cleanup */
     g_object_unref(generator);
     g_object_unref(parser);
+
+    // ===== GỬI LOG LÊN API =====
+    // Chỉ gửi nếu có student_id và face_image (nếu cần)
+    CURL *curl;
+    CURLcode res;
+    curl = curl_easy_init();
+    if (curl) {
+        // Tạo JSON body
+        JsonBuilder *builder = json_builder_new();
+        json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "student_id");
+        json_builder_add_string_value(builder, student_id);
+        json_builder_set_member_name(builder, "ip_address");
+        json_builder_add_string_value(builder, ip_address);
+        json_builder_set_member_name(builder, "mac_address");
+        json_builder_add_string_value(builder, mac_address);
+        json_builder_set_member_name(builder, "face_image");
+        json_builder_add_string_value(builder, full_frame_base64 ? full_frame_base64 : "");
+        json_builder_set_member_name(builder, "timestamp");
+        json_builder_add_string_value(builder, timestamp_str);
+        json_builder_end_object(builder);
+
+        JsonGenerator *gen = json_generator_new();
+        JsonNode *root = json_builder_get_root(builder);
+        json_generator_set_root(gen, root);
+        gchar *json_body = json_generator_to_data(gen, NULL);
+
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, "https://topcam.ai.vn/apis/aiFaceRecognitionLogAPI");
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
+
+        res = curl_easy_perform(curl);
+        if (res != CURLE_OK) {
+            g_print("Failed to send log to API: %s\n", curl_easy_strerror(res));
+        } else {
+            g_print("Sent log to API for student_id: %s\n", student_id);
+        }
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        g_free(json_body);
+        json_node_free(root);
+        g_object_unref(gen);
+        g_object_unref(builder);
+    }
 }
 
 /* Hàm xóa log cũ hơn 3 ngày */
