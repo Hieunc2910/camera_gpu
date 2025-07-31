@@ -59,7 +59,6 @@
 #include <algorithm>
 #include "deepstream_app.h"
 
-SaveFullFrameCallback g_save_full_frame_callback = nullptr;
 // Thread đồng bộ database 2 lần/ngày
 void* sync_student_db_thread(void* arg) {
     while (1) {
@@ -133,15 +132,15 @@ extern "C" void enable_rtsp_sink1_source(int cam_id) {
         g_print("ERROR: rtsp_sink1 chưa được khởi tạo hoặc không tồn tại!\n");
         return;
     }
-    
+
     // Kiểm tra trạng thái pipeline trước khi thay đổi
     GstState current_state;
     gst_element_get_state(rtsp_sink1, &current_state, NULL, GST_CLOCK_TIME_NONE);
-    
+
     if (current_state == GST_STATE_NULL) {
         enable_sink(rtsp_sink1);
     }
-    
+
     g_object_set(G_OBJECT(rtsp_sink1), "source-id", cam_id, NULL);
     g_print("Enabled RTSP sink1, set source-id=%d\n", cam_id);
 }
@@ -278,12 +277,6 @@ static bool save_image(const std::string &path,
                        NvDsFrameMeta *frame_meta,
                        unsigned &obj_counter)
 {
-    std::cout << "[DEBUG] save_image called\n";
-    std::cout << "[DEBUG] path: " << path << "\n";
-    std::cout << "[DEBUG] ip_surf: " << ip_surf << "\n";
-    std::cout << "[DEBUG] obj_meta: " << obj_meta << "\n";
-    std::cout << "[DEBUG] frame_meta: " << frame_meta << "\n";
-    std::cout << "[DEBUG] obj_counter: " << obj_counter << "\n";
 
     if (!ip_surf) {
         std::cerr << "[ERROR] ip_surf is NULL\n";
@@ -308,15 +301,10 @@ static bool save_image(const std::string &path,
     userData.objNum = obj_counter++;
     userData.quality = g_img_meta_consumer.get_quality();
 
-    std::cout << "[DEBUG] userData.fileNameImg: " << userData.fileNameImg << "\n";
-    std::cout << "[DEBUG] userData.objNum: " << userData.objNum << "\n";
-    std::cout << "[DEBUG] userData.quality: " << userData.quality << "\n";
 
     g_img_meta_consumer.init_image_save_library_on_first_time();
-    std::cout << "[DEBUG] Call nvds_obj_enc_process\n";
     nvds_obj_enc_process(g_img_meta_consumer.get_obj_ctx_handle(), &userData, ip_surf, obj_meta,
                          frame_meta);
-    std::cout << "[DEBUG] nvds_obj_enc_process finished\n";
     return true;
 }
 
@@ -583,57 +571,7 @@ static void bbox_generated_probe_after_analytics(AppCtx *appCtx,
             nvds_obj_enc_finish(g_img_meta_consumer.get_obj_ctx_handle());
     }
 }
-extern "C" void save_full_frame_impl(GstBuffer* frame_buffer, NvDsFrameMeta* frame_meta, const char* person_name) {
-    printf("DEBUG: save_full_frame_impl called with person_name='%s'\n", person_name);
-    if (!frame_buffer || !person_name) {
-        printf("[ERROR] save_full_frame_impl: buffer or person_name is NULL!\n");
-        return;
-    }
-    struct stat st = {0};
-    if (stat("pics_log", &st) == -1) {
-        if (mkdir("pics_log", 0755) == -1) {
-            printf("[ERROR] Cannot create pics_log directory!\n");
-            return;
-        }
-    }
-    GstMapInfo inmap = GST_MAP_INFO_INIT;
-    if (!gst_buffer_map(frame_buffer, &inmap, GST_MAP_READ)) {
-        printf("[ERROR] Cannot map GstBuffer!\n");
-        return;
-    }
-    NvBufSurface* ip_surf = (NvBufSurface*)inmap.data;
-    if (!ip_surf) {
-        printf("[ERROR] NvBufSurface is NULL!\n");
-        gst_buffer_unmap(frame_buffer, &inmap);
-        return;
-    }
-    NvDsObjectMeta dummy_obj_meta;
-    dummy_obj_meta.rect_params.left = 0;
-    dummy_obj_meta.rect_params.top = 0;
-    dummy_obj_meta.rect_params.width = ip_surf->surfaceList[0].width;
-    dummy_obj_meta.rect_params.height = ip_surf->surfaceList[0].height;
-    time_t now = time(NULL);
-    struct tm* t = localtime(&now);
-    char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
-    std::string safe_name;
-    for (const char* p = person_name; *p; ++p) {
-        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) {
-            safe_name += *p;
-        } else {
-            safe_name += '_';
-        }
-    }
-    std::string path = "pics_log/" + safe_name + "_" + timestamp + ".jpeg";
-    unsigned obj_counter = 0;
-    bool ok = save_image(path, ip_surf, &dummy_obj_meta, frame_meta, obj_counter);
-    gst_buffer_unmap(frame_buffer, &inmap); // Always unmap before return!
-    if (ok) {
-        printf("[INFO] Saved full frame image: %s\n", path.c_str());
-    } else {
-        printf("[ERROR] Failed to save image: %s\n", path.c_str());
-    }
-}
+
 
 ////////////////
 /* End Custom */
@@ -673,24 +611,10 @@ static void perf_cb(gpointer context, NvDsAppPerfStruct *str)
         fps_avg[i] = str->fps_avg[i];
     }
 
-    if (header_print_cnt % 20 == 0) {
-        g_print("\n**PERF:  ");
-        for (i = 0; i < numf; i++) {
-            g_print("FPS %d (Avg)\t", i);
-        }
-        g_print("\n");
-        header_print_cnt = 0;
-    }
     header_print_cnt++;
-    if (num_instances > 1)
-        g_print("PERF(%d): ", appCtx->index);
-    else
-        g_print("**PERF:  ");
 
     for (i = 0; i < numf; i++) {
-        g_print("%.2f (%.2f)\t", fps[i], fps_avg[i]);
     }
-    g_print("\n");
     g_mutex_unlock(&fps_lock);
 }
 
@@ -1112,7 +1036,7 @@ int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
     start_rabbitmq_listener_thread();
-    g_save_full_frame_callback = save_full_frame_impl;
+
     g_print("Callback function assigned successfully\n");
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
@@ -1201,7 +1125,7 @@ int main(int argc, char *argv[])
                 break;
             }
         }
-        
+
         // ====== GET RTSP SINK ELEMENTS AFTER PIPELINE CREATION ======
         // Assumes sink names are "sink1", "sink2", "sink3", "sink4" in config
         rtsp_sink1 = gst_bin_get_by_name(GST_BIN(appCtx[0]->pipeline.pipeline), "sink1");
