@@ -8,20 +8,24 @@ import os
 SYNC_URL = "https://topcam.ai.vn/apis/syncStudentsAPI"
 LAST_UPDATED_URL = "https://topcam.ai.vn/apis/lastUpdatedStudentAPI"
 TOKEN = "P8Hg4ukCiRI3NUMDvKmscEFnL0OtzT1752552517"
-DB_FILE = "../students_local.db"
+DB_FILE = "./students_local.db"
 
 def initialize_database():
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("""
-                  CREATE TABLE IF NOT EXISTS students (
-                      id INTEGER PRIMARY KEY,
-                      full_name TEXT NOT NULL,
-                      vector_face TEXT
-                  )
-                  """)
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS students
+            (
+                id INTEGER PRIMARY KEY,
+                label TEXT,
+                vector_face TEXT
+            )
+            """
+        )
         conn.commit()
+        print(f"Database đã được khởi tạo thành công tại '{DB_FILE}'")
         conn.close()
         return True
     except sqlite3.Error as e:
@@ -37,11 +41,16 @@ def save_to_sqlite(students):
         c = conn.cursor()
         c.execute("DELETE FROM students")
         student_data = [
-            (s["id"], s["full_name"], json.dumps(s.get("vector_face")))
+            (
+                s.get("id"),
+                s.get("label"),
+                s.get("vector_face")
+
+            )
             for s in students
         ]
         c.executemany(
-            "INSERT INTO students (id, full_name, vector_face) VALUES (?, ?, ?)",
+            "INSERT INTO students (id, label, vector_face) VALUES (?, ?, ?)",
             student_data
         )
         conn.commit()
@@ -63,11 +72,18 @@ def get_last_updated_local():
 
 def fetch_last_updated_server():
     try:
-        # Không cần token, không cần headers
+        headers = {"Authorization": f"Bearer {TOKEN}"}
         response = requests.post(LAST_UPDATED_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
-        last_updated = data.get("data", {}).get("last_updated_at")
+        # If data["data"] is a list, handle accordingly
+        data_field = data.get("data")
+        if isinstance(data_field, list) and data_field:
+            last_updated = data_field[0].get("last_updated_at")
+        elif isinstance(data_field, dict):
+            last_updated = data_field.get("last_updated_at")
+        else:
+            last_updated = None
         print(f"Thời gian cập nhật gần nhất trên server: {last_updated}")
         return last_updated
     except Exception as e:
@@ -76,17 +92,32 @@ def fetch_last_updated_server():
 
 def fetch_students():
     try:
-        # Gửi token trong body JSON, không cần headers
+        headers = {"Authorization": f"Bearer {TOKEN}"}
         print(f"Đang kết nối tới server: {SYNC_URL}")
         response = requests.post(SYNC_URL, json={"token": TOKEN}, timeout=30)
         response.raise_for_status()
         data = response.json()
-        print("DEBUG: raw response:", data)
-        students = data.get("data", [])
-        print("DEBUG: students from server:", students)
-        filtered_students = students
+
+        students_data = data.get("data", [])
+        if isinstance(students_data, dict):
+            students = [students_data]
+        elif isinstance(students_data, list):
+            students = students_data
+        else:
+            students = []
+
+        # Filter only id, label, vector_face
+        filtered_students = [
+            {
+                "id": s.get("id"),
+                "label": s.get("label"),
+                "vector_face": s.get("vector_face"),
+            }
+            for s in students
+        ]
+
         if not filtered_students:
-            print("Không nhận được dữ liệu học sinh hợp lệ từ server.")
+            print("Không nhận được dữ liệu học sinh từ server.")
             return
         save_to_sqlite(filtered_students)
     except requests.exceptions.Timeout:
@@ -103,7 +134,6 @@ if __name__ == "__main__":
     if initialize_database():
         # Bước 2: Kiểm tra thời gian cập nhật gần nhất trên server
         last_updated_server = fetch_last_updated_server()
-        # Nếu cần, có thể kiểm tra với local để quyết định có cần đồng bộ không
 
         # Bước 3: Nếu cần đồng bộ, tiến hành lấy dữ liệu.
         fetch_students()
@@ -112,7 +142,7 @@ if __name__ == "__main__":
         try:
             print("Đang cập nhật FAISS index từ database...")
             subprocess.run(
-                ["python", "../scripts/populate_faiss_from_db.py"],
+                ["python3", "./scripts/populate_faiss_from_db.py"],
                 check=True
             )
         except Exception as e:
