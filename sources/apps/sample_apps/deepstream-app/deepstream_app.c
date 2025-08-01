@@ -291,11 +291,9 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
     }
 
     /* Cleanup */
-    g_object_unref(generator);
-    g_object_unref(parser);
 
-    // ===== GỬI LOG LÊN API =====
-    // Chỉ gửi nếu có student_id và face_image (nếu cần)
+
+
     CURL *curl;
     CURLcode res;
     curl = curl_easy_init();
@@ -342,6 +340,8 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         g_object_unref(gen);
         g_object_unref(builder);
     }
+    g_object_unref(generator);
+    g_object_unref(parser);
 }
 
 /* Hàm xóa log cũ hơn 3 ngày */
@@ -2113,7 +2113,6 @@ gboolean create_pipeline(AppCtx *appCtx,
     g_mutex_init(&appCtx->latency_lock);
     GstElement *osd_elem = appCtx->pipeline.common_elements.osd_bin.nvosd;
     if (!osd_elem) {
-        g_printerr("[ERROR] Không tìm thấy phần tử nvdsosd trong pipeline!\n");
     } else {
         GstPad *osd_src_pad = gst_element_get_static_pad(osd_elem, "src");
         if (!osd_src_pad) {
