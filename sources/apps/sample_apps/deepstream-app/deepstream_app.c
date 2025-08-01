@@ -99,8 +99,8 @@ static CameraInfo camera_info[MAX_CAMERAS];
 static gboolean camera_info_initialized = FALSE;
 // Hàm lấy địa chỉ IP từ URL RTSP
 /* Thời gian timeout  */
-#define PRESENCE_TIMEOUT 5
-/* Thời gian gi��� log (3 ngày) */
+#define PRESENCE_TIMEOUT 300
+/* Thời gian giu log (3 ngày) */
 #define LOG_RETENTION_DAYS 3
 #define LOG_RETENTION_SECONDS (LOG_RETENTION_DAYS * 24 * 60 * 60)  // 3 days in seconds
 
@@ -179,6 +179,7 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
     struct tm* time_info;
     gchar* json_string = NULL;
     GError* error = NULL;
+    gboolean api_success = FALSE;
 
     g_mutex_lock(&person_list_mutex);
 
@@ -207,36 +208,9 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
     // Đủ điều kiện log (mới hoặc vừa quay lại sau khi vắng mặt)
     g_mutex_unlock(&person_list_mutex);
 
-    /* Tạo file log.json nếu chưa có */
-    if (!create_log_file_if_not_exists("log.json")) {
-        return;
-    }
-
-    /* Parse file JSON hiện tại */
-    parser = json_parser_new();
-
-    if (!json_parser_load_from_file(parser, "log.json", &error)) {
-        g_print("Error parsing log.json: %s\n", error->message);
-        g_error_free(error);
-        g_object_unref(parser);
-        return;
-    }
-
-    root_node = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_ARRAY(root_node)) {
-        g_print("Error: log.json does not contain an array\n");
-        g_object_unref(parser);
-        return;
-    }
-
-    root_array = json_node_get_array(root_node);
-
-    /* Tạo entry mới */
-    new_entry = json_object_new();
-
     /* Format timestamp */
     time_info = localtime(&current_time);
-    strftime(timestamp_str, sizeof(timestamp_str), "%Y-%m-%d %H:%M:%S", time_info);
+    strftime(timestamp_str, sizeof(timestamp_str), "%d-%m-%Y %H:%M:%S", time_info);
 
     // Lấy student_id thay vì sử dụng tên
     const char* student_id = get_student_id_from_name(person_name);
@@ -259,43 +233,10 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         full_frame_base64 = encode_full_frame_base64(surface, frame_meta);
     }
 
-    // Thêm các trường mới vào JSON
-    json_object_set_string_member(new_entry, "student_id", student_id);
-    json_object_set_string_member(new_entry, "timestamp", timestamp_str);
-    json_object_set_string_member(new_entry, "ip_address", ip_address);
-    json_object_set_string_member(new_entry, "mac_address", mac_address);
-
-    if (full_frame_base64) {
-    json_object_set_string_member(new_entry, "face_image", full_frame_base64);
-        free(full_frame_base64);
-    } else {
-        json_object_set_string_member(new_entry, "face_image", "");
-    }
-
-    /* Thêm vào array */
-    JsonNode* entry_node = json_node_new(JSON_NODE_OBJECT);
-    json_node_set_object(entry_node, new_entry);
-    json_array_add_element(root_array, entry_node);
-
-    /* Ghi lại file */
-    generator = json_generator_new();
-    json_generator_set_root(generator, root_node);
-    json_generator_set_pretty(generator, TRUE);
-
-    if (!json_generator_to_file(generator, "log.json", &error)) {
-        g_print("Error writing to log.json: %s\n", error->message);
-        g_error_free(error);
-    } else {
-        g_print("Logged recognition event: %s (ID: %s) at %s from IP: %s\n",
-                person_name, student_id, timestamp_str, ip_address);
-    }
-
-    /* Cleanup */
-
-
-
+    /* Thử gửi lên server trước */
     CURL *curl;
     CURLcode res;
+    long response_code = 0;
     curl = curl_easy_init();
     if (curl) {
         // Tạo JSON body
@@ -325,12 +266,17 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L); // Timeout 10 giây
 
         res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            g_print("Failed to send log to API: %s\n", curl_easy_strerror(res));
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+        if (res == CURLE_OK && response_code == 200) {
+            api_success = TRUE;
+            g_print("Successfully sent log to API for student_id: %s\n", student_id);
         } else {
-            g_print("Sent log to API for student_id: %s\n", student_id);
+            g_print("Failed to send log to API: %s (HTTP: %ld)\n",
+                   curl_easy_strerror(res), response_code);
         }
 
         curl_slist_free_all(headers);
@@ -340,6 +286,86 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         g_object_unref(gen);
         g_object_unref(builder);
     }
+
+    /* Nếu gửi API thành công, không cần lưu vào file local */
+    if (api_success) {
+        if (full_frame_base64) {
+            free(full_frame_base64);
+        }
+        return;
+    }
+
+    /* Nếu gửi API thất bại, lưu vào file log.json local */
+    g_print("Saving to local log due to API failure for student_id: %s\n", student_id);
+
+    /* Tạo file log.json nếu chưa có */
+    if (!create_log_file_if_not_exists("log.json")) {
+        if (full_frame_base64) {
+            free(full_frame_base64);
+        }
+        return;
+    }
+
+    /* Parse file JSON hiện tại */
+    parser = json_parser_new();
+
+    if (!json_parser_load_from_file(parser, "log.json", &error)) {
+        g_print("Error parsing log.json: %s\n", error->message);
+        g_error_free(error);
+        g_object_unref(parser);
+        if (full_frame_base64) {
+            free(full_frame_base64);
+        }
+        return;
+    }
+
+    root_node = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_ARRAY(root_node)) {
+        g_print("Error: log.json does not contain an array\n");
+        g_object_unref(parser);
+        if (full_frame_base64) {
+            free(full_frame_base64);
+        }
+        return;
+    }
+
+    root_array = json_node_get_array(root_node);
+
+    /* Tạo entry mới */
+    new_entry = json_object_new();
+
+    // Thêm các trường vào JSON
+    json_object_set_string_member(new_entry, "student_id", student_id);
+    json_object_set_string_member(new_entry, "timestamp", timestamp_str);
+    json_object_set_string_member(new_entry, "ip_address", ip_address);
+    json_object_set_string_member(new_entry, "mac_address", mac_address);
+
+    if (full_frame_base64) {
+        json_object_set_string_member(new_entry, "face_image", full_frame_base64);
+        free(full_frame_base64);
+    } else {
+        json_object_set_string_member(new_entry, "face_image", "");
+    }
+
+    /* Thêm vào array */
+    JsonNode* entry_node = json_node_new(JSON_NODE_OBJECT);
+    json_node_set_object(entry_node, new_entry);
+    json_array_add_element(root_array, entry_node);
+
+    /* Ghi lại file */
+    generator = json_generator_new();
+    json_generator_set_root(generator, root_node);
+    json_generator_set_pretty(generator, TRUE);
+
+    if (!json_generator_to_file(generator, "log.json", &error)) {
+        g_print("Error writing to log.json: %s\n", error->message);
+        g_error_free(error);
+    } else {
+        g_print("Saved to local log: %s (ID: %s) at %s from IP: %s\n",
+                person_name, student_id, timestamp_str, ip_address);
+    }
+
+    /* Cleanup */
     g_object_unref(generator);
     g_object_unref(parser);
 }
@@ -2393,13 +2419,11 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
     NvBufSurface* cuda_surface = NULL;
     gboolean need_cleanup = FALSE;
 
-    // ✅ XỬ LÝ THEO MEMORY TYPE
     switch (surface->memType) {
         case NVBUF_MEM_DEFAULT: {
             NvBufSurfaceMemType actual_type = get_actual_memory_type(surface);
 
             if (actual_type == NVBUF_MEM_CUDA_DEVICE) {
-                // ✅ PHƯƠNG PHÁP 1: Copy trực tiếp từ GPU memory
                 host_data = copy_gpu_data_to_host(surface, batch_id);
                 if (host_data) {
                     size_t frame_size = params->width * params->height * 4;
