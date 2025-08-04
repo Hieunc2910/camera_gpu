@@ -190,19 +190,19 @@ void attach_metadata_detector(GstNvInfer *nvinfer,
                                            NvOSD_ColorParams{255, 0, 0, 1},  // Left mouth
                                            NvOSD_ColorParams{0, 0, 255, 1}}; // Right mouth
 
-            for (unsigned int landmark_idx = 0; landmark_idx < obj.num_landmark; landmark_idx++) {
-                NvOSD_CircleParams &circle_params =
-                    display_meta->circle_params[display_meta->num_circles];
-
-                circle_params.xc = obj.landmark[landmark_idx * 2];
-                circle_params.yc = obj.landmark[landmark_idx * 2 + 1];
-
-                circle_params.radius = 2;
-                circle_params.circle_color = colors[landmark_idx];
-                circle_params.has_bg_color = 0;
-                circle_params.bg_color = colors[landmark_idx];
-                display_meta->num_circles++;
-            }
+//            for (unsigned int landmark_idx = 0; landmark_idx < obj.num_landmark; landmark_idx++) {
+//                NvOSD_CircleParams &circle_params =
+//                    display_meta->circle_params[display_meta->num_circles];
+//
+//                circle_params.xc = obj.landmark[landmark_idx * 2];
+//                circle_params.yc = obj.landmark[landmark_idx * 2 + 1];
+//
+//                circle_params.radius = 2;
+//                circle_params.circle_color = colors[landmark_idx];
+//                circle_params.has_bg_color = 0;
+//                circle_params.bg_color = colors[landmark_idx];
+//                display_meta->num_circles++;
+//            }
 
             if (nvinfer->output_face_detection_landmark) {
                 NvDsUserMeta *user_meta = nvds_acquire_user_meta_from_pool(batch_meta);
@@ -339,10 +339,19 @@ void attach_metadata_classifier(GstNvInfer *nvinfer,
             text_params.font_params.font_size = 11;
             text_params.font_params.font_color = (NvOSD_ColorParams){1, 1, 1, 1};
         }
-        temp = object_meta->text_params.display_text;
-        object_meta->text_params.display_text =
-            g_strconcat(temp, " ", string_label.c_str(), nullptr);
-        g_free(temp);
+
+        if (string_label != "Unknown" && string_label.find_first_not_of(" \t\n\r") != std::string::npos) {
+            g_free(object_meta->text_params.display_text);
+            object_meta->text_params.display_text = g_strdup(string_label.c_str());
+
+            strncpy(object_meta->obj_label, string_label.c_str(), MAX_LABEL_SIZE - 1);
+            object_meta->obj_label[MAX_LABEL_SIZE - 1] = '\0';
+        } else {
+            temp = object_meta->text_params.display_text;
+            object_meta->text_params.display_text =
+                g_strconcat(temp, " ", string_label.c_str(), nullptr);
+            g_free(temp);
+        }
     }
     if (nvinfer->input_tensor_from_meta) {
         nvds_add_classifier_meta_to_roi(frame.roi_meta, classifier_meta);
