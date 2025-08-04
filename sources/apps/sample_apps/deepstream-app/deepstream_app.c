@@ -37,7 +37,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <json-glib/json-glib.h>
-
+#include <png.h>
 #include <sys/time.h>
 #include <curl/curl.h>
 
@@ -262,7 +262,7 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");
 
-        curl_easy_setopt(curl, CURLOPT_URL, "https://atopcam.ai.vn/apis/aiFaceRecognitionLogAPI");
+        curl_easy_setopt(curl, CURLOPT_URL, "https://topcam.ai.vn/apis/aiFaceRecognitionLogAPI");
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
@@ -274,6 +274,133 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         if (res == CURLE_OK && response_code == 200) {
             api_success = TRUE;
             g_print("Successfully sent log to API for student_id: %s\n", student_id);
+
+            /* Khi API thành công, thử gửi lại các log local đã tồn tại */
+            static time_t last_retry_time = 0;
+            time_t now = time(NULL);
+            if (now - last_retry_time > 60) { // Chỉ retry mỗi 1 phút để tránh spam
+                last_retry_time = now;
+
+                // Kiểm tra xem có file log.json không và có log nào cần retry không
+                if (access("log.json", F_OK) == 0) {
+                    JsonParser* retry_parser = json_parser_new();
+                    GError* retry_error = NULL;
+
+                    if (json_parser_load_from_file(retry_parser, "log.json", &retry_error)) {
+                        JsonNode* retry_root = json_parser_get_root(retry_parser);
+                        if (JSON_NODE_HOLDS_ARRAY(retry_root)) {
+                            JsonArray* retry_array = json_node_get_array(retry_root);
+                            gint retry_count = json_array_get_length(retry_array);
+
+                            if (retry_count > 0) {
+                                g_print("Found %d pending logs, attempting to retry...\n", retry_count);
+
+                                JsonArray* remaining_logs = json_array_new();
+                                gboolean has_successful_retries = FALSE;
+
+                                // Duyệt qua từng log và thử gửi lại
+                                for (gint i = 0; i < retry_count; i++) {
+                                    JsonNode* log_node = json_array_get_element(retry_array, i);
+                                    if (!JSON_NODE_HOLDS_OBJECT(log_node)) continue;
+
+                                    JsonObject* log_obj = json_node_get_object(log_node);
+                                    const char* retry_student_id = json_object_get_string_member(log_obj, "student_id");
+                                    const char* retry_timestamp = json_object_get_string_member(log_obj, "timestamp");
+                                    const char* retry_ip = json_object_get_string_member(log_obj, "ip_address");
+                                    const char* retry_mac = json_object_get_string_member(log_obj, "mac_address");
+                                    const char* retry_image = json_object_get_string_member(log_obj, "face_image");
+
+                                    if (!retry_student_id || !retry_timestamp || !retry_ip || !retry_mac) {
+                                        continue; // Bỏ qua log thiếu thông tin
+                                    }
+
+                                    // Thử gửi log này
+                                    CURL *retry_curl = curl_easy_init();
+                                    if (retry_curl) {
+                                        JsonBuilder *retry_builder = json_builder_new();
+                                        json_builder_begin_object(retry_builder);
+                                        json_builder_set_member_name(retry_builder, "student_id");
+                                        json_builder_add_string_value(retry_builder, retry_student_id);
+                                        json_builder_set_member_name(retry_builder, "ip_address");
+                                        json_builder_add_string_value(retry_builder, retry_ip);
+                                        json_builder_set_member_name(retry_builder, "mac_address");
+                                        json_builder_add_string_value(retry_builder, retry_mac);
+                                        json_builder_set_member_name(retry_builder, "face_image");
+                                        json_builder_add_string_value(retry_builder, retry_image ? retry_image : "");
+                                        json_builder_set_member_name(retry_builder, "timestamp");
+                                        json_builder_add_string_value(retry_builder, retry_timestamp);
+                                        json_builder_end_object(retry_builder);
+
+                                        JsonGenerator *retry_gen = json_generator_new();
+                                        JsonNode *retry_json_root = json_builder_get_root(retry_builder);
+                                        json_generator_set_root(retry_gen, retry_json_root);
+                                        gchar *retry_json_body = json_generator_to_data(retry_gen, NULL);
+
+                                        struct curl_slist *retry_headers = NULL;
+                                        retry_headers = curl_slist_append(retry_headers, "Content-Type: application/json");
+
+                                        curl_easy_setopt(retry_curl, CURLOPT_URL, "https://topcam.ai.vn/apis/aiFaceRecognitionLogAPI");
+                                        curl_easy_setopt(retry_curl, CURLOPT_POST, 1L);
+                                        curl_easy_setopt(retry_curl, CURLOPT_HTTPHEADER, retry_headers);
+                                        curl_easy_setopt(retry_curl, CURLOPT_POSTFIELDS, retry_json_body);
+                                        curl_easy_setopt(retry_curl, CURLOPT_TIMEOUT, 5L); // Timeout ngắn hơn cho retry
+
+                                        CURLcode retry_res = curl_easy_perform(retry_curl);
+                                        long retry_response_code = 0;
+                                        curl_easy_getinfo(retry_curl, CURLINFO_RESPONSE_CODE, &retry_response_code);
+
+                                        if (retry_res == CURLE_OK && retry_response_code == 200) {
+                                            has_successful_retries = TRUE;
+                                            g_print("Successfully retried log for student_id: %s\n", retry_student_id);
+                                        } else {
+                                            // Gửi thất bại, giữ lại log này
+                                            json_array_add_element(remaining_logs, json_node_copy(log_node));
+                                        }
+
+                                        curl_slist_free_all(retry_headers);
+                                        curl_easy_cleanup(retry_curl);
+                                        g_free(retry_json_body);
+                                        json_node_free(retry_json_root);
+                                        g_object_unref(retry_gen);
+                                        g_object_unref(retry_builder);
+                                    } else {
+                                        // Không tạo được curl, giữ lại log
+                                        json_array_add_element(remaining_logs, json_node_copy(log_node));
+                                    }
+                                }
+
+                                // Cập nhật file log.json với những log chưa gửi được
+                                if (has_successful_retries) {
+                                    JsonNode* remaining_root = json_node_new(JSON_NODE_ARRAY);
+                                    json_node_set_array(remaining_root, remaining_logs);
+
+                                    JsonGenerator* retry_generator = json_generator_new();
+                                    json_generator_set_root(retry_generator, remaining_root);
+                                    json_generator_set_pretty(retry_generator, TRUE);
+
+                                    GError* write_error = NULL;
+                                    if (!json_generator_to_file(retry_generator, "log.json", &write_error)) {
+                                        g_print("Error updating log.json after retry: %s\n", write_error->message);
+                                        g_error_free(write_error);
+                                    } else {
+                                        gint remaining_count = json_array_get_length(remaining_logs);
+                                        g_print("Retry completed: %d logs sent, %d logs remaining\n",
+                                               retry_count - remaining_count, remaining_count);
+                                    }
+
+                                    json_node_free(remaining_root);
+                                    g_object_unref(retry_generator);
+                                } else {
+                                    json_array_unref(remaining_logs);
+                                }
+                            }
+                        }
+                    } else {
+                        g_error_free(retry_error);
+                    }
+                    g_object_unref(retry_parser);
+                }
+            }
         } else {
             g_print("Failed to send log to API: %s (HTTP: %ld)\n",
                    curl_easy_strerror(res), response_code);
@@ -2380,7 +2507,127 @@ static char* copy_gpu_data_to_host(NvBufSurface* surface, guint batch_id) {
 
     return host_buffer;
 }
+#include <png.h>
 
+// Callback function cho PNG writer
+static void png_write_callback(png_structp png_ptr, png_bytep data, png_size_t length) {
+    struct {
+        unsigned char** buffer;
+        size_t* size;
+        size_t* capacity;
+    }* write_data = (void*)png_get_io_ptr(png_ptr);
+
+    size_t new_size = *(write_data->size) + length;
+    if (new_size > *(write_data->capacity)) {
+        *(write_data->capacity) = new_size * 2;
+        *(write_data->buffer) = (unsigned char*)realloc(*(write_data->buffer), *(write_data->capacity));
+    }
+
+    memcpy(*(write_data->buffer) + *(write_data->size), data, length);
+    *(write_data->size) = new_size;
+}
+
+// Hàm resize RGBA data với bilinear interpolation
+static unsigned char* resize_rgba_bilinear(unsigned char* src_data, int src_width, int src_height,
+                                          int dst_width, int dst_height) {
+    if (!src_data) return NULL;
+
+    unsigned char* dst_data = (unsigned char*)malloc(dst_width * dst_height * 4);
+    if (!dst_data) return NULL;
+
+    float x_ratio = (float)src_width / dst_width;
+    float y_ratio = (float)src_height / dst_height;
+
+    for (int y = 0; y < dst_height; y++) {
+        for (int x = 0; x < dst_width; x++) {
+            float src_x = x * x_ratio;
+            float src_y = y * y_ratio;
+
+            int x1 = (int)src_x;
+            int y1 = (int)src_y;
+            int x2 = (x1 + 1 < src_width) ? x1 + 1 : x1;
+            int y2 = (y1 + 1 < src_height) ? y1 + 1 : y1;
+
+            float dx = src_x - x1;
+            float dy = src_y - y1;
+
+            for (int c = 0; c < 4; c++) { // RGBA channels
+                float val = (1 - dx) * (1 - dy) * src_data[(y1 * src_width + x1) * 4 + c] +
+                           dx * (1 - dy) * src_data[(y1 * src_width + x2) * 4 + c] +
+                           (1 - dx) * dy * src_data[(y2 * src_width + x1) * 4 + c] +
+                           dx * dy * src_data[(y2 * src_width + x2) * 4 + c];
+
+                dst_data[(y * dst_width + x) * 4 + c] = (unsigned char)val;
+            }
+        }
+    }
+
+    return dst_data;
+}
+
+// Hàm chuyển RGBA thành PNG
+static char* rgba_to_png_base64(unsigned char* rgba_data, int width, int height) {
+    if (!rgba_data) return NULL;
+
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) return NULL;
+
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        png_destroy_write_struct(&png_ptr, NULL);
+        return NULL;
+    }
+
+    unsigned char* png_buffer = NULL;
+    size_t png_size = 0;
+    size_t png_capacity = 0;
+
+    struct {
+        unsigned char** buffer;
+        size_t* size;
+        size_t* capacity;
+    } write_data = { &png_buffer, &png_size, &png_capacity };
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        if (png_buffer) free(png_buffer);
+        return NULL;
+    }
+
+    // Setup PNG write callback
+    png_set_write_fn(png_ptr, &write_data, png_write_callback, NULL);
+
+    // Set PNG header
+    png_set_IHDR(png_ptr, info_ptr, width, height, 8,
+                 PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE,
+                 PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+
+    // Set compression level (0-9, 6 is default)
+    png_set_compression_level(png_ptr, 6);
+
+    png_write_info(png_ptr, info_ptr);
+
+    // Create row pointers
+    png_bytep* row_pointers = (png_bytep*)malloc(sizeof(png_bytep) * height);
+    for (int y = 0; y < height; y++) {
+        row_pointers[y] = rgba_data + y * width * 4;
+    }
+
+    png_write_image(png_ptr, row_pointers);
+    png_write_end(png_ptr, NULL);
+
+    // Cleanup
+    free(row_pointers);
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+
+    // Encode PNG to base64
+    char* base64_result = base64_encode(png_buffer, png_size);
+    free(png_buffer);
+
+    return base64_result;
+}
+
+// Function chính được cập nhật
 static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* frame_meta) {
     if (!surface || !frame_meta) {
         g_print("[DEBUG] Invalid surface or frame_meta\n");
@@ -2400,12 +2647,14 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
         return NULL;
     }
 
-
+    // ✅ Target resolution - 720p
+    const int TARGET_WIDTH = 1280;
+    const int TARGET_HEIGHT = 720;
 
     char* result = NULL;
     char* host_data = NULL;
-    NvBufSurface* cuda_surface = NULL;
-    gboolean need_cleanup = FALSE;
+    unsigned char* resized_data = NULL;
+    char* png_base64 = NULL;
 
     switch (surface->memType) {
         case NVBUF_MEM_DEFAULT: {
@@ -2414,20 +2663,28 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
             if (actual_type == NVBUF_MEM_CUDA_DEVICE) {
                 host_data = copy_gpu_data_to_host(surface, batch_id);
                 if (host_data) {
-                    size_t frame_size = params->width * params->height * 4;
-                    result = base64_encode((unsigned char*)host_data, frame_size);
+                    // Resize ảnh từ original size xuống 720p
+                    resized_data = resize_rgba_bilinear((unsigned char*)host_data,
+                                                       params->width, params->height,
+                                                       TARGET_WIDTH, TARGET_HEIGHT);
                     free(host_data);
 
-                    return result;
+                    if (resized_data) {
+                        png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
+                        free(resized_data);
+                    }
                 }
-
             } else {
                 // Jetson: NVBUF_MEM_SURFACE_ARRAY - có thể map trực tiếp
                 if (NvBufSurfaceMap(surface, batch_id, 0, NVBUF_MAP_READ) == 0) {
                     if (params->dataPtr) {
-                        size_t frame_size = params->width * params->height * 4;
-                        result = base64_encode((unsigned char*)params->dataPtr, frame_size);
-
+                        resized_data = resize_rgba_bilinear((unsigned char*)params->dataPtr,
+                                                           params->width, params->height,
+                                                           TARGET_WIDTH, TARGET_HEIGHT);
+                        if (resized_data) {
+                            png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
+                            free(resized_data);
+                        }
                     }
                     NvBufSurfaceUnMap(surface, batch_id, 0);
                 }
@@ -2437,14 +2694,19 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
 
         case NVBUF_MEM_CUDA_PINNED:
         case NVBUF_MEM_CUDA_UNIFIED: {
-            // Các loại memory này có thể map được
             if (NvBufSurfaceMap(surface, batch_id, 0, NVBUF_MAP_READ) == 0) {
                 NvBufSurfaceSyncForCpu(surface, batch_id, 0);
 
                 if (params->dataPtr) {
-                    size_t frame_size = params->width * params->height * 4;
-                    result = base64_encode((unsigned char*)params->dataPtr, frame_size);
-                    g_print("[DEBUG] Successfully encoded from CUDA memory\n");
+                    resized_data = resize_rgba_bilinear((unsigned char*)params->dataPtr,
+                                                       params->width, params->height,
+                                                       TARGET_WIDTH, TARGET_HEIGHT);
+                    if (resized_data) {
+                        png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
+                        free(resized_data);
+                        g_print("[DEBUG] Successfully encoded PNG from CUDA memory: %dx%d -> %dx%d\n",
+                               params->width, params->height, TARGET_WIDTH, TARGET_HEIGHT);
+                    }
                 }
 
                 NvBufSurfaceUnMap(surface, batch_id, 0);
@@ -2453,24 +2715,33 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
         }
 
         case NVBUF_MEM_CUDA_DEVICE: {
-            // Pure GPU memory - cần copy về host
             host_data = copy_gpu_data_to_host(surface, batch_id);
             if (host_data) {
-                size_t frame_size = params->width * params->height * 4;
-                result = base64_encode((unsigned char*)host_data, frame_size);
+                resized_data = resize_rgba_bilinear((unsigned char*)host_data,
+                                                   params->width, params->height,
+                                                   TARGET_WIDTH, TARGET_HEIGHT);
                 free(host_data);
 
+                if (resized_data) {
+                    png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
+                    free(resized_data);
+                }
             }
             break;
         }
 
         case NVBUF_MEM_SURFACE_ARRAY: {
-            // Jetson native memory - có thể map trực tiếp
             if (NvBufSurfaceMap(surface, batch_id, 0, NVBUF_MAP_READ) == 0) {
                 if (params->dataPtr) {
-                    size_t frame_size = params->width * params->height * 4;
-                    result = base64_encode((unsigned char*)params->dataPtr, frame_size);
-                    g_print("[DEBUG] Successfully encoded from surface array\n");
+                    resized_data = resize_rgba_bilinear((unsigned char*)params->dataPtr,
+                                                       params->width, params->height,
+                                                       TARGET_WIDTH, TARGET_HEIGHT);
+                    if (resized_data) {
+                        png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
+                        free(resized_data);
+                        g_print("[DEBUG] Successfully encoded PNG from surface array: %dx%d -> %dx%d\n",
+                               params->width, params->height, TARGET_WIDTH, TARGET_HEIGHT);
+                    }
                 }
                 NvBufSurfaceUnMap(surface, batch_id, 0);
             }
@@ -2483,14 +2754,23 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
         }
     }
 
-    // Cleanup transformed surface nếu có
-    if (need_cleanup && cuda_surface) {
-        NvBufSurfaceDestroy(cuda_surface);
+    if (!png_base64) {
+        g_print("[ERROR] Failed to encode PNG frame - all methods failed\n");
+        return NULL;
     }
 
-    if (!result) {
-        g_print("[ERROR] Failed to encode frame - all methods failed\n");
+    // ✅ Tạo string theo định dạng web chuẩn
+    const char* mime_type = "image/png";
+    size_t header_len = snprintf(NULL, 0, "data:%s;base64,", mime_type);
+    size_t total_len = header_len + strlen(png_base64) + 1;
+
+    result = (char*)malloc(total_len);
+    if (result) {
+        snprintf(result, total_len, "data:%s;base64,%s", mime_type, png_base64);
+                params->width, params->height, TARGET_WIDTH, TARGET_HEIGHT, strlen(png_base64));
     }
 
+    free(png_base64);
     return result;
 }
+
