@@ -262,7 +262,7 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");
 
-        curl_easy_setopt(curl, CURLOPT_URL, "https://topcam.ai.vn/apis/aiFaceRecognitionLogAPI");
+        curl_easy_setopt(curl, CURLOPT_URL, "https://atopcam.ai.vn/apis/aiFaceRecognitionLogAPI");
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
@@ -1118,8 +1118,8 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta, GstBuffer *f
             obj->text_params.display_text[0] = '\0';
             str_ins_pos = obj->text_params.display_text;
 
-            // if (obj->obj_label[0] != '\0')
-            //     sprintf(str_ins_pos, "%s", obj->obj_label);
+            if (obj->obj_label[0] != '\0')
+                sprintf(str_ins_pos, "%s", obj->obj_label);
             str_ins_pos += strlen(str_ins_pos);
 
             if (obj->object_id != UNTRACKED_OBJECT_ID) {
@@ -1469,7 +1469,7 @@ static gboolean create_demux_pipeline(AppCtx *appCtx, guint index)
     NVGSTDS_BIN_ADD_GHOST_PAD(instance_bin->bin, last_elem, "sink");
     if (config->osd_config.enable) {
         NVGSTDS_ELEM_ADD_PROBE(instance_bin->all_bbox_buffer_probe_id, instance_bin->osd_bin.nvosd,
-                               "sink", gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
+                               "src", gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
                                instance_bin);
     } else {
         NVGSTDS_ELEM_ADD_PROBE(
@@ -1922,7 +1922,7 @@ gboolean create_pipeline(AppCtx *appCtx,
 
             demux_src_pad = gst_element_get_request_pad(pipeline->demuxer, pad_name);
             NVGSTDS_LINK_ELEMENT_FULL(pipeline->demuxer, pad_name,
-                                      pipeline->demux_instance_bins[i].bin, "sink");
+                                      pipeline->demux_instance_bins[i].bin, "src");
             gst_object_unref(demux_src_pad);
 
             NVGSTDS_ELEM_ADD_PROBE(
@@ -2137,19 +2137,7 @@ gboolean create_pipeline(AppCtx *appCtx,
     g_mutex_init(&appCtx->app_lock);
     g_cond_init(&appCtx->app_cond);
     g_mutex_init(&appCtx->latency_lock);
-    GstElement *osd_elem = appCtx->pipeline.common_elements.osd_bin.nvosd;
-    if (!osd_elem) {
-    } else {
-        GstPad *osd_src_pad = gst_element_get_static_pad(osd_elem, "src");
-        if (!osd_src_pad) {
-            g_printerr("[ERROR] Không lấy được src pad từ nvdsosd\n");
-        } else {
-            gst_pad_add_probe(osd_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
-                              gie_processing_done_buf_prob, (gpointer)appCtx, NULL);
-            g_print("[INFO] Đã gắn probe tại nvdsosd:src để lấy frame có overlay\n");
-            gst_object_unref(osd_src_pad);
-        }
-    }
+
 
     ret = TRUE;
 done:
