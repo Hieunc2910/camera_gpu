@@ -278,7 +278,7 @@ static void log_recognition_event(const char* person_name, NvBufSurface* surface
             /* Khi API thành công, thử gửi lại các log local đã tồn tại */
             static time_t last_retry_time = 0;
             time_t now = time(NULL);
-            if (now - last_retry_time > 60) { // Chỉ retry mỗi 1 phút để tránh spam
+            if (now - last_retry_time > 180) { // Chỉ retry mỗi 1 phút để tránh spam
                 last_retry_time = now;
 
                 // Kiểm tra xem có file log.json không và có log nào cần retry không
@@ -2507,8 +2507,6 @@ static char* copy_gpu_data_to_host(NvBufSurface* surface, guint batch_id) {
 
     return host_buffer;
 }
-#include <png.h>
-
 // Callback function cho PNG writer
 static void png_write_callback(png_structp png_ptr, png_bytep data, png_size_t length) {
     struct {
@@ -2627,7 +2625,6 @@ static char* rgba_to_png_base64(unsigned char* rgba_data, int width, int height)
     return base64_result;
 }
 
-// Function chính được cập nhật
 static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* frame_meta) {
     if (!surface || !frame_meta) {
         g_print("[DEBUG] Invalid surface or frame_meta\n");
@@ -2641,13 +2638,11 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
 
     NvBufSurfaceParams* params = &surface->surfaceList[batch_id];
 
-    // ✅ CHỈ XỬ LÝ RGBA FORMAT
     if (params->colorFormat != NVBUF_COLOR_FORMAT_RGBA) {
         g_print("[DEBUG] Skipping non-RGBA format: %s\n", get_color_format_str(params->colorFormat));
         return NULL;
     }
 
-    // ✅ Target resolution - 720p
     const int TARGET_WIDTH = 1280;
     const int TARGET_HEIGHT = 720;
 
@@ -2704,8 +2699,7 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
                     if (resized_data) {
                         png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
                         free(resized_data);
-                        g_print("[DEBUG] Successfully encoded PNG from CUDA memory: %dx%d -> %dx%d\n",
-                               params->width, params->height, TARGET_WIDTH, TARGET_HEIGHT);
+
                     }
                 }
 
@@ -2739,8 +2733,7 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
                     if (resized_data) {
                         png_base64 = rgba_to_png_base64(resized_data, TARGET_WIDTH, TARGET_HEIGHT);
                         free(resized_data);
-                        g_print("[DEBUG] Successfully encoded PNG from surface array: %dx%d -> %dx%d\n",
-                               params->width, params->height, TARGET_WIDTH, TARGET_HEIGHT);
+
                     }
                 }
                 NvBufSurfaceUnMap(surface, batch_id, 0);
@@ -2767,7 +2760,7 @@ static char* encode_full_frame_base64(NvBufSurface* surface, NvDsFrameMeta* fram
     result = (char*)malloc(total_len);
     if (result) {
         snprintf(result, total_len, "data:%s;base64,%s", mime_type, png_base64);
-                params->width, params->height, TARGET_WIDTH, TARGET_HEIGHT, strlen(png_base64));
+
     }
 
     free(png_base64);
