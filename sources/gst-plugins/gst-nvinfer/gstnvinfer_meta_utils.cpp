@@ -340,13 +340,31 @@ void attach_metadata_classifier(GstNvInfer *nvinfer,
             text_params.font_params.font_color = (NvOSD_ColorParams){1, 1, 1, 1};
         }
 
-        if (string_label != "Unknown" && string_label.find_first_not_of(" \t\n\r") != std::string::npos) {
-            g_free(object_meta->text_params.display_text);
-            object_meta->text_params.display_text = g_strdup(string_label.c_str());
+        std::string clean_label = string_label;
 
-            strncpy(object_meta->obj_label, string_label.c_str(), MAX_LABEL_SIZE - 1);
+        size_t comma_pos = clean_label.find(',');
+        if (comma_pos != std::string::npos && comma_pos + 1 < clean_label.length()) {
+            clean_label = clean_label.substr(comma_pos + 1);
+
+            size_t start = clean_label.find_first_not_of(" \t\n\r");
+            if (start != std::string::npos) {
+                clean_label = clean_label.substr(start);
+                size_t end = clean_label.find_last_not_of(" \t\n\r");
+                if (end != std::string::npos) {
+                    clean_label = clean_label.substr(0, end + 1);
+                }
+            }
+        }
+
+        if (clean_label != "Unknown" && clean_label.find_first_not_of(" \t\n\r") != std::string::npos) {
+
+            g_free(object_meta->text_params.display_text);
+            object_meta->text_params.display_text = g_strdup(clean_label.c_str());
+
+            strncpy(object_meta->obj_label, clean_label.c_str(), MAX_LABEL_SIZE - 1);
             object_meta->obj_label[MAX_LABEL_SIZE - 1] = '\0';
         } else {
+   
             temp = object_meta->text_params.display_text;
             object_meta->text_params.display_text =
                 g_strconcat(temp, " ", string_label.c_str(), nullptr);
