@@ -35,7 +35,7 @@ static guint uid = 0;
 static GstRTSPServer *server[MAX_SINK_BINS];
 static guint server_count = 0;
 static GMutex server_cnt_lock;
-
+static gboolean create_rtmpsink_bin(NvDsSinkEncoderConfig *config, NvDsSinkBinSubBin *bin);
 GST_DEBUG_CATEGORY_EXTERN(NVDS_APP);
 
 /**
@@ -621,7 +621,7 @@ static gboolean create_udpsink_bin(NvDsSinkEncoderConfig *config, NvDsSinkBinSub
         goto done;
     }
 
-    g_object_set(G_OBJECT(bin->sink), "host", "224.224.255.255", "port", config->udp_port, "async",
+    g_object_set(G_OBJECT(bin->sink), "host", "0.0.0.0", "port", config->udp_port, "async",
                  FALSE, "sync", 0, NULL);
 
     gst_bin_add_many(GST_BIN(bin->bin), bin->queue, bin->cap_filter, bin->transform, bin->encoder,
@@ -761,9 +761,9 @@ static gboolean create_hlssink_bin(NvDsSinkEncoderConfig *config, NvDsSinkBinSub
     }
 
     g_object_set(G_OBJECT(bin->sink), "location", config->hls_location, "max-files",
-                 config->hls_max_files, "playlist-length", config->hls_playlist_length,
-                 "playlist-location", config->hls_playlist_location, "playlist-root",
-                 config->hls_playlist_root, "target-duration", config->hls_target_duration, NULL);
+             config->hls_max_files, "playlist-length", config->hls_playlist_length,
+             "playlist-location", config->hls_playlist_location,
+             "target-duration", config->hls_target_duration, NULL);
 
     gst_bin_add_many(GST_BIN(bin->bin), bin->queue, bin->cap_filter, bin->transform, bin->encoder,
                      bin->codecparse, bin->sink, NULL);
@@ -774,6 +774,178 @@ static gboolean create_hlssink_bin(NvDsSinkEncoderConfig *config, NvDsSinkBinSub
     NVGSTDS_LINK_ELEMENT(bin->encoder, bin->codecparse);
     NVGSTDS_LINK_ELEMENT(bin->codecparse, bin->sink);
 
+    NVGSTDS_BIN_ADD_GHOST_PAD(bin->bin, bin->queue, "sink");
+
+    ret = TRUE;
+
+done:
+    if (caps) {
+        gst_caps_unref(caps);
+    }
+    if (!ret) {
+        NVGSTDS_ERR_MSG_V("%s failed", __func__);
+    }
+    return ret;
+}
+
+static gboolean create_rtmpsink_bin(NvDsSinkEncoderConfig *config, NvDsSinkBinSubBin *bin)
+{
+    GstCaps *caps = NULL;
+    gboolean ret = FALSE;
+    gchar elem_name[50];
+    gchar encode_name[50];
+    int probe_id = 0;
+
+    uid++;
+
+    // Create bin container
+    g_snprintf(elem_name, sizeof(elem_name), "sink_sub_bin%d", uid);
+    bin->bin = gst_bin_new(elem_name);
+    if (!bin->bin) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", elem_name);
+        goto done;
+    }
+
+    // Create queue element
+    g_snprintf(elem_name, sizeof(elem_name), "sink_sub_bin_queue%d", uid);
+    bin->queue = gst_element_factory_make(NVDS_ELEM_QUEUE, elem_name);
+    if (!bin->queue) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", elem_name);
+        goto done;
+    }
+
+
+    // Configure queue for better multi-stream stability and latency handling
+    g_object_set(G_OBJECT(bin->queue),
+                 "max-size-buffers", 200,     // Increased buffer size for latency
+                 "max-size-time", 3000000000, // 3 seconds for FLV mux latency
+                 "leaky", 2,                  // Drop old buffers when full
+                 NULL);
+
+    // Create video converter
+    g_snprintf(elem_name, sizeof(elem_name), "sink_sub_bin_transform%d", uid);
+    bin->transform = gst_element_factory_make(NVDS_ELEM_VIDEO_CONV, elem_name);
+    if (!bin->transform) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", elem_name);
+        goto done;
+    }
+
+    // Create caps filter for format conversion
+    g_snprintf(elem_name, sizeof(elem_name), "sink_sub_bin_cap_filter%d", uid);
+    bin->cap_filter = gst_element_factory_make(NVDS_ELEM_CAPS_FILTER, elem_name);
+    if (!bin->cap_filter) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", elem_name);
+        goto done;
+    }
+
+    // Set caps based on encoder type
+    if (config->enc_type == NV_DS_ENCODER_TYPE_SW)
+        caps = gst_caps_from_string("video/x-raw, format=I420");
+    else
+        caps = gst_caps_from_string("video/x-raw(memory:NVMM), format=I420");
+
+    g_object_set(G_OBJECT(bin->cap_filter), "caps", caps, NULL);
+
+    // Create encoder and parser based on codec
+    g_snprintf(encode_name, sizeof(encode_name), "sink_sub_bin_encoder%d", uid);
+
+    switch (config->codec) {
+    case NV_DS_ENCODER_H264:
+        bin->codecparse = gst_element_factory_make("h264parse", "h264-parser");
+        if (config->enc_type == NV_DS_ENCODER_TYPE_SW)
+            bin->encoder = gst_element_factory_make(NVDS_ELEM_ENC_H264_SW, encode_name);
+        else
+            bin->encoder = gst_element_factory_make(NVDS_ELEM_ENC_H264_HW, encode_name);
+        break;
+    case NV_DS_ENCODER_H265:
+        bin->codecparse = gst_element_factory_make("h265parse", "h265-parser");
+        g_object_set(G_OBJECT(bin->codecparse), "config-interval", -1, NULL);
+        if (config->enc_type == NV_DS_ENCODER_TYPE_SW)
+            bin->encoder = gst_element_factory_make(NVDS_ELEM_ENC_H265_SW, encode_name);
+        else
+            bin->encoder = gst_element_factory_make(NVDS_ELEM_ENC_H265_HW, encode_name);
+        break;
+    default:
+        goto done;
+    }
+
+    if (!bin->encoder) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", encode_name);
+        goto done;
+    }
+
+    // Add probe to handle seek queries
+    NVGSTDS_ELEM_ADD_PROBE(probe_id, bin->encoder, "sink", seek_query_drop_prob,
+                           GST_PAD_PROBE_TYPE_QUERY_UPSTREAM, bin);
+
+    // Configure encoder with stream-specific settings
+    if (config->enc_type == NV_DS_ENCODER_TYPE_SW) {
+        g_object_set(G_OBJECT(bin->encoder), "bitrate", config->bitrate / 1000, NULL);
+        // Add thread safety for software encoder
+        g_object_set(G_OBJECT(bin->encoder), "threads", 2, NULL);
+    } else {
+        g_object_set(G_OBJECT(bin->encoder), "bitrate", config->bitrate, NULL);
+        g_object_set(G_OBJECT(bin->encoder), "profile", config->profile, NULL);
+        g_object_set(G_OBJECT(bin->encoder), "iframeinterval", config->iframeinterval, NULL);
+        // Remove preset-level as it's not supported in nvv4l2h264enc
+        // g_object_set(G_OBJECT(bin->encoder), "preset-level", 1, NULL);
+    }
+
+    // Handle GPU properties for integrated vs discrete GPUs
+    struct cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, config->gpu_id);
+
+    if (prop.integrated) {
+        if (config->enc_type == NV_DS_ENCODER_TYPE_HW) {
+            g_object_set(G_OBJECT(bin->encoder), "insert-sps-pps", 1, NULL);
+            g_object_set(G_OBJECT(bin->encoder), "bufapi-version", 1, NULL);
+        }
+    } else {
+        g_object_set(G_OBJECT(bin->transform), "gpu-id", config->gpu_id, NULL);
+    }
+
+    // Create FLV muxer for RTMP streaming
+    g_snprintf(elem_name, sizeof(elem_name), "sink_sub_bin_mux%d", uid);
+    bin->mux = gst_element_factory_make("flvmux", elem_name);
+    if (!bin->mux) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", elem_name);
+        goto done;
+    }
+
+    // Configure FLV muxer with streaming optimizations and latency handling
+    g_object_set(G_OBJECT(bin->mux),
+                 "streamable", TRUE,
+                 "latency", 3000000000,    // 3 seconds latency to match queue
+                 NULL);
+
+    // Create RTMP sink
+    g_snprintf(elem_name, sizeof(elem_name), "sink_sub_bin_rtmpsink%d", uid);
+    bin->sink = gst_element_factory_make("rtmpsink", elem_name);
+    if (!bin->sink) {
+        NVGSTDS_ERR_MSG_V("Failed to create '%s'", elem_name);
+        goto done;
+    }
+
+    // Configure RTMP sink with timeout and retry logic
+    g_object_set(G_OBJECT(bin->sink),
+                 "location", config->rtmp_url,
+                 "sync", config->sync,
+                 "async", FALSE,
+                 NULL);
+
+    // Add all elements to bin
+    gst_bin_add_many(GST_BIN(bin->bin), bin->queue, bin->cap_filter, bin->transform, bin->encoder,
+                     bin->codecparse, bin->mux, bin->sink, NULL);
+
+    // Link elements in pipeline order
+    NVGSTDS_LINK_ELEMENT(bin->queue, bin->transform);
+    NVGSTDS_LINK_ELEMENT(bin->transform, bin->cap_filter);
+    NVGSTDS_LINK_ELEMENT(bin->cap_filter, bin->encoder);
+    NVGSTDS_LINK_ELEMENT(bin->encoder, bin->codecparse);
+    NVGSTDS_LINK_ELEMENT(bin->codecparse, bin->mux);
+    NVGSTDS_LINK_ELEMENT(bin->mux, bin->sink);
+
+    // Add ghost pad for external connection
     NVGSTDS_BIN_ADD_GHOST_PAD(bin->bin, bin->queue, "sink");
 
     ret = TRUE;
@@ -863,6 +1035,11 @@ gboolean create_sink_bin(guint num_sub_bins,
             if (!create_hlssink_bin(&config_array[i].encoder_config, &bin->sub_bins[i]))
                 goto done;
             break;
+        case NV_DS_SINK_RTMPSINK:
+            config_array[i].encoder_config.sync = config_array[i].sync;
+            if (!create_rtmpsink_bin(&config_array[i].encoder_config, &bin->sub_bins[i]))
+                goto done;
+            break;
         default:
             goto done;
         }
@@ -889,6 +1066,7 @@ gboolean create_sink_bin(guint num_sub_bins,
     }
 
     ret = TRUE;
+
 done:
     if (!ret) {
         NVGSTDS_ERR_MSG_V("%s failed", __func__);
@@ -964,6 +1142,11 @@ gboolean create_demux_sink_bin(guint num_sub_bins,
         case NV_DS_SINK_HLSSINK:
             config_array[i].encoder_config.sync = config_array[i].sync;
             if (!create_hlssink_bin(&config_array[i].encoder_config, &bin->sub_bins[i]))
+                goto done;
+            break;
+        case NV_DS_SINK_RTMPSINK:
+            config_array[i].encoder_config.sync = config_array[i].sync;
+            if (!create_rtmpsink_bin(&config_array[i].encoder_config, &bin->sub_bins[i]))
                 goto done;
             break;
         default:
