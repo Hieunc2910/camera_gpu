@@ -37,6 +37,7 @@ typedef enum {
     NV_DS_SINK_RENDER_OVERLAY,
     NV_DS_SINK_MSG_CONV_BROKER,
     NV_DS_SINK_HLSSINK,
+    NV_DS_SINK_RTMPSINK
 } NvDsSinkType;
 
 typedef enum { NV_DS_CONTAINER_MP4 = 1, NV_DS_CONTAINER_MKV } NvDsContainerType;
@@ -65,6 +66,7 @@ typedef struct {
     gchar *hls_playlist_location;
     gchar *hls_playlist_root;
     guint hls_target_duration;
+    gchar *rtmp_url;
 } NvDsSinkEncoderConfig;
 
 typedef struct {
