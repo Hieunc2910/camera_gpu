@@ -1969,6 +1969,16 @@ gboolean create_pipeline(AppCtx *appCtx,
      * Add muxer and < N > source components to the pipeline based
      * on the settings in configuration file.
      */
+    int enabled_sink_count = 0;
+    for (guint i = 0; i < config->num_sink_sub_bins; i++) {
+        if (config->sink_bin_sub_bin_config[i].enable) {
+            g_print("Sink %d enabled: type=%d, source-id=%d\n", i,
+                config->sink_bin_sub_bin_config[i].type,
+                config->sink_bin_sub_bin_config[i].source_id);
+            enabled_sink_count++;
+        }
+    }
+    g_print("Total enabled sinks: %d\n", enabled_sink_count);
     if (!create_multi_source_bin(config->num_source_sub_bins, config->multi_source_config,
                                  &pipeline->multi_src_bin))
         goto done;

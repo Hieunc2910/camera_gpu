@@ -3,7 +3,7 @@ enable-perf-measurement=1
 perf-measurement-interval-sec=2
 
 [tiled-display]
-enable=1
+enable=0
 
 [source0]
 enable=1
