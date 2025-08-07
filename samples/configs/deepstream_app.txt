@@ -9,11 +9,46 @@ enable=1
 enable=1
 gpu-id=0
 #Type - 1=CameraV4L2 2=URI 3=MultiURI 4: RTSP
+type=1
+# # (0): memtype_device   - Memory type Device
+# # (1): memtype_pinned   - Memory type Host Pinned
+# # (2): memtype_unified  - Memory type Unified
+# cudadec-memtype=2
+nvbuf-memory-type=2
+camera-width=1280
+camera-height=720
+camera-fps-n=10
+camera-fps-d=1
+camera-v4l2-dev-node=0
+
+[source1]
+enable=1
+gpu-id=0
+#Type - 1=CameraV4L2 2=URI 3=MultiURI 4: RTSP
 type=4
 uri=rtsp://admin:vh%40124578@192.168.1.95:554/Streaming/Channels/101
 # (0): memtype_device   - Memory type Device
 # (1): memtype_pinned   - Memory type Host Pinned
-# (2): memtype_unified  - Memory type Unified
+# # (2): memtype_unified  - Memory type Unified
+drop-on-latency=1
+do-retransmission=1
+latency=2000
+cudadec-memtype=2
+nvbuf-memory-type=2
+select-rtp-protocol=0
+rtsp-reconnect-interval-sec=60
+rtsp-reconnect-attempts=5
+
+
+[source2]
+enable=0
+gpu-id=0
+#Type - 1=CameraV4L2 2=URI 3=MultiURI 4: RTSP
+type=2
+uri=file://../videos/Friends.mp4
+# (0): memtype_device   - Memory type Device
+# (1): memtype_pinned   - Memory type Host Pinned
+# # (2): memtype_unified  - Memory type Unified
 drop-on-latency=1
 do-retransmission=1
 latency=2000
@@ -22,6 +57,25 @@ nvbuf-memory-type=0
 select-rtp-protocol=0
 rtsp-reconnect-interval-sec=60
 rtsp-reconnect-attempts=5
+
+[source3]
+enable=0
+gpu-id=0
+#Type - 1=CameraV4L2 2=URI 3=MultiURI 4: RTSP
+type=4
+uri=rtsp://192.168.1.59:8554/cam1
+# (0): memtype_device   - Memory type Device
+# (1): memtype_pinned   - Memory type Host Pinned
+# # (2): memtype_unified  - Memory type Unified
+drop-on-latency=1
+do-retransmission=1
+latency=2000
+cudadec-memtype=0
+nvbuf-memory-type=0
+select-rtp-protocol=0
+rtsp-reconnect-interval-sec=60
+rtsp-reconnect-attempts=5
+
 
 [sink0]
 enable=0
@@ -38,22 +92,22 @@ codec=1
 output-file=./outputs/videos/Friends.mp4
 
 [sink1]
-enable=1
+enable=0
 source-id=0
 gpu-id=0
 #Type - 1=FakeSink 2=EglSink 3=File 4=RTSPStreaming 5=Overlay
-type=2
+type=4
 #1=h264 2=h265
 codec=1
 #encoder type 0=Hardware 1=Software
 enc-type=0
-sync=1
-bitrate=4000000
+sync=0
+bitrate=2000000
 #H264 Profile - 0=Baseline 2=Main 4=High
 #H265 Profile - 0=Main 1=Main10
 profile=0
 # set below properties in case of RTSPStreaming
-rtsp-port=554
+rtsp-port=8554
 udp-port=5400
 
 [sink2]
@@ -89,22 +143,50 @@ new-api=1
 enable=0
 source-id=0
 gpu-id=0
-#Type - 1=FakeSink 2=EglSink 3=File 4=RTSPStreaming 5=Overlay 6=MsgConvBroker 7=Hlssink
+#Type - 1=FakeSink 2=EglSink 3=File 4=RTSPStreaming 5=Overlay 6=MsgConvBroker 7=Hlssink 8=RTMPSink
 type=7
 #1=h264 2=h265
 codec=1
 #encoder type 0=Hardware 1=Software
 enc-type=0
-sync=1
-bitrate=4000000
+sync=0
+bitrate=2000000
 #H264 Profile - 0=Baseline 2=Main 4=High
 #H265 Profile - 0=Main 1=Main10
 profile=0
 hls-location=./outputs/hls/segment%05d.ts
-hls-max-files=10
-hls-playlist-length=5
+hls-max-files=5
+hls-playlist-length=3
 hls-playlist-location=./outputs/hls/playlist.m3u8
-hls-target-duration=1
+hls-target-duration=2
+
+[sink4]
+enable=1
+type=8
+sync=0
+rtmp-url=rtmp://103.74.123.202:1935/live/topcam_1
+# RTMP streaming settings - Using software encoder to avoid codec issues
+codec=1  # H.264
+enc-type=1  # Software encoder to avoid NVDEC codec compatibility issues
+bitrate=2000000  # 2Mbps for good quality
+profile=0  # Baseline for low latency live streaming
+iframeinterval=30  # Good balance for seeking and efficiency
+gpu-id=0
+source-id=0
+
+[sink5]
+enable=1  # Enable second stream
+type=8
+sync=0
+rtmp-url=rtmp://103.74.123.202:1935/live/topcam_2
+# RTMP streaming settings - Using software encoder to avoid codec issues
+codec=1  # H.264
+enc-type=1  # Software encoder to avoid NVDEC codec compatibility issues
+bitrate=2000000  # 2Mbps for good quality
+profile=0  # Baseline for low latency live streaming
+iframeinterval=30  # Good balance for seeking and efficiency
+gpu-id=0
+source-id=1
 
 [osd]
 enable=1
@@ -119,7 +201,7 @@ clock-x-offset=800
 clock-y-offset=820
 clock-text-size=12
 clock-color=1;0;0;0
-nvbuf-memory-type=0
+nvbuf-memory-type=2
 display-mask=0
 display-bbox=1
 display-text=1
@@ -128,22 +210,22 @@ display-text=1
 gpu-id=0
 ##Boolean property to inform muxer that sources are live
 live-source=1
-# buffer-pool-size=1
-batch-size=1
+buffer-pool-size=16
+batch-size=2  # MUST match number of enabled sources (source0 + source1)
 ##time out in usec, to wait after the first buffer is available
 ##to push the batch even if the complete batch is not formed
-batched-push-timeout=40000
+batched-push-timeout=25000  # Reduced timeout for dual stream sync
 ## Set muxer output width and height
-width=2560
-height=1440
+width=1280   # Reduced resolution for dual stream performance
+height=720   # Reduced resolution for dual stream performance
 ##Enable to maintain aspect ratio wrt source, and allow black borders, works
 ##along with width, height properties
-# enable-padding=1
-nvbuf-memory-type=0
+enable-padding=1
+nvbuf-memory-type=2
 ## If set to TRUE, system timestamp will be attached as ntp timestamp
 ## If set to FALSE, ntp timestamp from rtspsrc, if available, will be attached
-attach-sys-ts-as-ntp=0
-sync-inputs=1
+attach-sys-ts-as-ntp=1
+sync-inputs=1  # Enable sync for dual streams
 # config-file=config_sreammux.txt
 
 # config-file property is mandatory for any gie section.
@@ -151,11 +233,11 @@ sync-inputs=1
 # the infer config file.
 [primary-gie]
 enable=1
-batch-size=1
+batch-size=2  # MUST match streammux batch-size
 gpu-id=0
 interval=0
 gie-unique-id=1
-nvbuf-memory-type=0
+nvbuf-memory-type=2
 config-file=config_infer_primary.txt
 
 [tracker]
@@ -176,12 +258,12 @@ display-tracking-id=1
 
 [secondary-gie0]
 enable=1
-batch-size=8
+batch-size=2  # MUST match streammux batch-size
 gpu-id=0
 gie-unique-id=2
 operate-on-gie-id=1
 # operate-on-class-ids=0;
-nvbuf-memory-type=0
+nvbuf-memory-type=2
 config-file=config_infer_secondary_recognition2.txt
 
 [tests]
