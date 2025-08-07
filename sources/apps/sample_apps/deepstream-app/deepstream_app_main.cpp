@@ -99,47 +99,7 @@ void start_student_db_sync_thread() {
 /////////////////
 /* Start Custom */
 /////////////////
-// Hàm khởi động thread cho RabbitMQ listener C++
-void start_rabbitmq_listener_cpp_thread() {
-    std::thread([](){
-        rabbitmq_listener_main();
-    }).detach();
-}
-// ====== GLOBAL SINK POINTERS FOR DYNAMIC ENABLE/DISABLE ======
-GstElement* rtsp_sink1 = nullptr;
 
-// ====== DYNAMIC SINK CONTROL FUNCTIONS ======
-void enable_sink(GstElement* sink) {
-    if (sink) gst_element_set_state(sink, GST_STATE_PLAYING);
-}
-
-void disable_sink(GstElement* sink) {
-    if (sink) gst_element_set_state(sink, GST_STATE_NULL);
-}
-// ====== EXPORT FUNCTION FOR PYTHON/CTYPES ======
-extern "C" void enable_rtsp_sink1_source(int cam_id) {
-    if (!rtsp_sink1) {
-        g_print("ERROR: rtsp_sink1 chưa được khởi tạo hoặc không tồn tại!\n");
-        return;
-    }
-
-    // Kiểm tra trạng thái pipeline trước khi thay đổi
-    GstState current_state;
-    gst_element_get_state(rtsp_sink1, &current_state, NULL, GST_CLOCK_TIME_NONE);
-
-    if (current_state == GST_STATE_NULL) {
-        enable_sink(rtsp_sink1);
-    }
-
-    g_object_set(G_OBJECT(rtsp_sink1), "source-id", cam_id, NULL);
-    g_print("Enabled RTSP sink1, set source-id=%d\n", cam_id);
-}
-extern "C" void disable_rtsp_sink1() {
-    if (rtsp_sink1) {
-        gst_element_set_state(rtsp_sink1, GST_STATE_NULL);
-        g_print("Disabled RTSP sink1\n");
-    }
-}
 ////////////////
 /* End Custom */
 ////////////////
@@ -1025,7 +985,6 @@ static gboolean recreate_pipeline_thread_func(gpointer arg)
 int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
-    start_rabbitmq_listener_cpp_thread();
     
     g_print("Callback function assigned successfully\n");
     GOptionContext *ctx = NULL;
@@ -1115,14 +1074,6 @@ int main(int argc, char *argv[])
                 break;
             }
         }
-
-        // ====== GET RTSP SINK ELEMENTS AFTER PIPELINE CREATION ======
-        // Assumes sink names are "sink1", "sink2", "sink3", "sink4" in config
-        rtsp_sink1 = gst_bin_get_by_name(GST_BIN(appCtx[0]->pipeline.pipeline), "sink1");
-
-        // ====== EXAMPLE: ENABLE/DISABLE SINKS BASED ON YOUR LOGIC ======
-        // enable_sink(rtsp_sink1); // To enable RTSP sink1
-        // disable_sink(rtsp_sink1); // To disable RTSP sink1
 
         if (should_goto_done)
             break;
@@ -1330,7 +1281,6 @@ int main(int argc, char *argv[])
     }
 
     gst_deinit();
-    // ====== CLEANUP SINK POINTERS ======
-    if (rtsp_sink1) gst_object_unref(rtsp_sink1);
+
     return return_value;
 }
