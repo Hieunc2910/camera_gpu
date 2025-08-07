@@ -186,6 +186,7 @@ GST_DEBUG_CATEGORY(APP_CFG_PARSER_CAT);
 /* Start Custom */
 /////////////////
 #define CONFIG_GROUP_SINK_MSG_CONV_BROKER_ON_BROKER_ON_DEMUX "msg-conv-broker-on-demux"
+#define CONFIG_GROUP_SINK_RTMP_URL "rtmp-url"
 ////////////////
 /* End Custom */
 ////////////////
@@ -1672,7 +1673,21 @@ gboolean parse_sink(NvDsSinkSubBinConfig *config,
             config->encoder_config.hls_target_duration = g_key_file_get_integer(
                 key_file, group, CONFIG_GROUP_SINK_HLS_TARGET_DURATION, &error);
             CHECK_ERROR(error);
-        } else if (!g_strcmp0(*key, CONFIG_GROUP_SINK_OVERLAY_ID)) {
+        }
+
+        /////////////////
+        /* Start Custom */
+        /////////////////
+        else if (!g_strcmp0(*key, CONFIG_GROUP_SINK_RTMP_URL)) {
+            config->encoder_config.rtmp_url =
+                g_key_file_get_string(key_file, group, CONFIG_GROUP_SINK_RTMP_URL, &error);
+            CHECK_ERROR(error);
+        }
+        ////////////////
+        /* End Custom */
+        ////////////////
+
+        else if (!g_strcmp0(*key, CONFIG_GROUP_SINK_OVERLAY_ID)) {
             config->render_config.overlay_id =
                 g_key_file_get_integer(key_file, group, CONFIG_GROUP_SINK_OVERLAY_ID, &error);
             CHECK_ERROR(error);
