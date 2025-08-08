@@ -988,7 +988,8 @@ static gboolean recreate_pipeline_thread_func(gpointer arg)
 int main(int argc, char *argv[])
 {
     start_student_db_sync_thread();
-
+    system("python3 ./scripts/rtmp_url_config_change.py ./samples/configs/deepstream_app.txt");
+    // --------------------------------------------
     g_print("Callback function assigned successfully\n");
     GOptionContext *ctx = NULL;
     GOptionGroup *group = NULL;
