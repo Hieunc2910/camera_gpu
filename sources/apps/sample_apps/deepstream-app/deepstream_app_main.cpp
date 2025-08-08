@@ -60,12 +60,17 @@
 #include "deepstream_app.h"
 
 // Thread đồng bộ database 2 lần/ngày
+// Synchronize database immediately on app start, then continue as before
 void* sync_student_db_thread(void* arg) {
+    // Sync once at startup
+    printf("Đang đồng bộ database học sinh lần đầu khi khởi động app...\n");
+    system("python3 ./scripts/create_db_fr_server.py");
+    sleep(60); // Wait 1 minute to avoid duplicate syncs
+
     while (1) {
         time_t now = time(NULL);
         struct tm *tm_now = localtime(&now);
 
-        // Sinh giờ phút random cho hôm nay nếu sang ngày mới
         static int rand_hour = -1, rand_minute = -1, last_day = -1;
         if (last_day != tm_now->tm_mday) {
             rand_hour = rand() % 12;      // 0-11h
@@ -76,19 +81,17 @@ void* sync_student_db_thread(void* arg) {
         int hour = tm_now->tm_hour;
         int minute = tm_now->tm_min;
 
-        // Nếu đúng giờ phút lần 1 hoặc lần 2 thì gọi script
         if ((hour == rand_hour && minute == rand_minute) ||
             (hour == (rand_hour + 12) % 24 && minute == rand_minute)) {
             printf("Đang đồng bộ database học sinh...\n");
             system("python3 ./scripts/create_db_fr_server.py");
-            sleep(60); // Chờ 1 phút để tránh gọi lặp lại trong cùng phút
+            sleep(60);
         }
 
-        sleep(10); // Kiểm tra lại sau 10 giây
+        sleep(10);
     }
     return NULL;
 }
-
 // Gọi hàm này ở đầu hàm main để khởi động thread nền
 void start_student_db_sync_thread() {
     pthread_t tid;

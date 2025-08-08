@@ -104,7 +104,7 @@ source-id=0
 type=8
 sync=0
 # rtmp-url will be auto-generated from camera source (V4L2)
-rtmp-url=rtmp://103.74.123.202:1935/live/topcam_1
+rtmp-url=rtmp://103.74.123.202:1935/live/topcam_1?vhost=stream.topcam.ai.vn&secret=x[V$Dsp}RzWU9I%(6GZW*QE7(X3t4k_?U179
 # RTMP streaming settings - Tối ưu cho dual stream
 codec=1  # H.264
 enc-type=0  # Hardware encoder để tránh CPU conflict
@@ -121,7 +121,7 @@ type=8
 sync=0
 # rtmp-url will be auto-generated from RTSP source: rtsp://admin:vh%40124578@192.168.1.95:554/Streaming/Channels/101
 # Expected auto-generated URL: rtmp://103.74.123.202:1935/live/topcam_{MAC_ADDRESS_OF_192.168.1.95}
-rtmp-url=rtmp://103.74.123.202:1935/live/topcam_2
+rtmp-url=rtmp://103.74.123.202:1935/live/topcam_2?vhost=stream.topcam.ai.vn&secret=x[V$Dsp}RzWU9I%(6GZW*QE7(X3t4k_?U179
 # RTMP streaming settings - Tối ưu cho dual stream
 codec=1  # H.264
 enc-type=0  # Hardware encoder để tránh CPU conflict
