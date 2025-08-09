@@ -271,4 +271,4 @@ labels.txt
 *.jpg
 *.jpeg
 log.json
-
+students_local.db
